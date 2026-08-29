@@ -1,0 +1,44 @@
+name: Audit
+
+permissions:
+  contents: read
+
+on:
+  schedule:
+    - cron: "0 0 * * 2,6" # Every Tuesday and Saturday at 09:00 JST
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: lts/*
+          cache: "npm"
+      - run: npm install -g npm@latest
+      - run: npm version
+      - run: |
+          STABLE_TAG=$(cat docs/release.json | jq -r .stable.tag)
+          LATEST_TAG=$(cat docs/release.json | jq -r .latest.tag)
+          echo "STABLE_TAG=$STABLE_TAG" >> $GITHUB_ENV
+          echo "LATEST_TAG=$LATEST_TAG" >> $GITHUB_ENV
+      - name: Latest Version
+        run: |
+          set -euo pipefail
+          echo "Latest Version is $LATEST_TAG"
+          git checkout $LATEST_TAG
+          npm ci --dry-run --prefer-online
+          npm audit --audit-level critical
+      - name: Stable Version
+        run: |
+          set -euo pipefail
+          echo "Stable Version is $STABLE_TAG"
+          git checkout $STABLE_TAG
+          npm ci --dry-run --prefer-online
+          npm audit --audit-level critical

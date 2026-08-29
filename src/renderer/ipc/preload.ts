@@ -1,0 +1,480 @@
+import { MenuEvent } from "@/common/control/menu";
+import { AppState, ResearchState } from "@/common/control/state";
+import { GameResult } from "@/common/game/result";
+import { contextBridge, ipcRenderer, webUtils } from "electron";
+import { Background, Renderer } from "@/common/ipc/channel";
+import { Bridge } from "@/renderer/ipc/bridge";
+import { LogType, LogLevel } from "@/common/log";
+import { CSAGameResult, CSASpecialMove } from "@/common/game/csa";
+import { PromptTarget } from "@/common/advanced/prompt";
+import { CommandType } from "@/common/advanced/command";
+import { BookFormat } from "@/common/book";
+
+const api: Bridge = {
+  // Core
+  updateAppState(appState: AppState, researchState: ResearchState, busy: boolean): void {
+    ipcRenderer.send(Background.UPDATE_APP_STATE, appState, researchState, busy);
+  },
+  async fetchProcessArgs(): Promise<string> {
+    return await ipcRenderer.invoke(Background.FETCH_PROCESS_ARGS);
+  },
+  onClosable(): void {
+    ipcRenderer.send(Background.ON_CLOSABLE);
+  },
+  onClose(callback: (confirmations: string[]) => void): void {
+    ipcRenderer.on(Renderer.CLOSE, (_, confirmations: string[]) => {
+      callback(confirmations);
+    });
+  },
+  onSendError(callback: (e: string) => void): void {
+    ipcRenderer.on(Renderer.SEND_ERROR, (_, e) => {
+      callback(e);
+    });
+  },
+  onSendMessage(callback: (json: string) => void): void {
+    ipcRenderer.on(Renderer.SEND_MESSAGE, (_, json) => {
+      callback(json);
+    });
+  },
+  onSendNotification(callback: (message: string, url?: string) => void): void {
+    ipcRenderer.on(Renderer.SEND_NOTIFICATION, (_, message, url) => {
+      callback(message, url);
+    });
+  },
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  onMenuEvent(callback: (event: MenuEvent, ...args: any[]) => void): void {
+    ipcRenderer.on(Renderer.MENU_EVENT, (_, event, ...args) => callback(event, ...args));
+  },
+
+  // Settings
+  async loadAppSettings(): Promise<string> {
+    return await ipcRenderer.invoke(Background.LOAD_APP_SETTINGS);
+  },
+  async saveAppSettings(json: string): Promise<void> {
+    await ipcRenderer.invoke(Background.SAVE_APP_SETTINGS, json);
+  },
+  async loadBatchConversionSettings(): Promise<string> {
+    return await ipcRenderer.invoke(Background.LOAD_BATCH_CONVERSION_SETTINGS);
+  },
+  async saveBatchConversionSettings(json: string): Promise<void> {
+    await ipcRenderer.invoke(Background.SAVE_BATCH_CONVERSION_SETTINGS, json);
+  },
+  async loadResearchSettings(): Promise<string> {
+    return await ipcRenderer.invoke(Background.LOAD_RESEARCH_SETTINGS);
+  },
+  async saveResearchSettings(json: string): Promise<void> {
+    await ipcRenderer.invoke(Background.SAVE_RESEARCH_SETTINGS, json);
+  },
+  async loadAnalysisSettings(): Promise<string> {
+    return await ipcRenderer.invoke(Background.LOAD_ANALYSIS_SETTINGS);
+  },
+  async saveAnalysisSettings(json: string): Promise<void> {
+    await ipcRenderer.invoke(Background.SAVE_ANALYSIS_SETTINGS, json);
+  },
+  async loadBatchAnalysisSettings(): Promise<string> {
+    return await ipcRenderer.invoke(Background.LOAD_BATCH_ANALYSIS_SETTINGS);
+  },
+  async saveBatchAnalysisSettings(json: string): Promise<void> {
+    await ipcRenderer.invoke(Background.SAVE_BATCH_ANALYSIS_SETTINGS, json);
+  },
+  async loadGameSettings(): Promise<string> {
+    return await ipcRenderer.invoke(Background.LOAD_GAME_SETTINGS);
+  },
+  async saveGameSettings(json: string): Promise<void> {
+    await ipcRenderer.invoke(Background.SAVE_GAME_SETTINGS, json);
+  },
+  async loadCSAGameSettingsHistory(): Promise<string> {
+    return await ipcRenderer.invoke(Background.LOAD_CSA_GAME_SETTINGS_HISTORY);
+  },
+  async saveCSAGameSettingsHistory(json: string): Promise<void> {
+    await ipcRenderer.invoke(Background.SAVE_CSA_GAME_SETTINGS_HISTORY, json);
+  },
+  async loadMateSearchSettings(): Promise<string> {
+    return await ipcRenderer.invoke(Background.LOAD_MATE_SEARCH_SETTINGS);
+  },
+  async saveMateSearchSettings(json: string): Promise<void> {
+    await ipcRenderer.invoke(Background.SAVE_MATE_SEARCH_SETTINGS, json);
+  },
+  async loadUSIEngines(): Promise<string> {
+    return await ipcRenderer.invoke(Background.LOAD_USI_ENGINES);
+  },
+  async saveUSIEngines(json: string): Promise<void> {
+    await ipcRenderer.invoke(Background.SAVE_USI_ENGINES, json);
+  },
+  async loadBookImportSettings(): Promise<string> {
+    return await ipcRenderer.invoke(Background.LOAD_BOOK_IMPORT_SETTINGS);
+  },
+  async saveBookImportSettings(json: string): Promise<void> {
+    await ipcRenderer.invoke(Background.SAVE_BOOK_IMPORT_SETTINGS, json);
+  },
+  onUpdateAppSettings(callback: (json: string) => void): void {
+    ipcRenderer.on(Renderer.UPDATE_APP_SETTINGS, (_, json) => callback(json));
+  },
+
+  // Record File
+  async showOpenRecordDialog(formats: string[]): Promise<string> {
+    return await ipcRenderer.invoke(Background.SHOW_OPEN_RECORD_DIALOG, formats);
+  },
+  async showSaveRecordDialog(defaultPath: string): Promise<string> {
+    return await ipcRenderer.invoke(Background.SHOW_SAVE_RECORD_DIALOG, defaultPath);
+  },
+  async showSaveMergedRecordDialog(defaultPath: string): Promise<string> {
+    return await ipcRenderer.invoke(Background.SHOW_SAVE_MERGED_RECORD_DIALOG, defaultPath);
+  },
+  async openRecord(path: string): Promise<Uint8Array> {
+    return await ipcRenderer.invoke(Background.OPEN_RECORD, path);
+  },
+  async saveRecord(path: string, data: Uint8Array): Promise<void> {
+    await ipcRenderer.invoke(Background.SAVE_RECORD, path, data);
+  },
+  async loadRemoteTextFile(url: string): Promise<string> {
+    return await ipcRenderer.invoke(Background.LOAD_REMOTE_TEXT_FILE, url);
+  },
+  async convertRecordFiles(json: string): Promise<string> {
+    return await ipcRenderer.invoke(Background.CONVERT_RECORD_FILES, json);
+  },
+  async listRecordFiles(json: string): Promise<string> {
+    return await ipcRenderer.invoke(Background.LIST_RECORD_FILES, json);
+  },
+  async showSelectSFENDialog(lastPath: string): Promise<string> {
+    return await ipcRenderer.invoke(Background.SHOW_SELECT_SFEN_DIALOG, lastPath);
+  },
+  async loadSFENFile(path: string): Promise<string[]> {
+    return await ipcRenderer.invoke(Background.LOAD_SFEN_FILE, path);
+  },
+  async showOpenNextMoveCollectionDialog(): Promise<string> {
+    return await ipcRenderer.invoke(Background.SHOW_OPEN_NEXT_MOVE_COLLECTION_DIALOG);
+  },
+  async showSaveNextMoveCollectionDialog(defaultPath: string): Promise<string> {
+    return await ipcRenderer.invoke(Background.SHOW_SAVE_NEXT_MOVE_COLLECTION_DIALOG, defaultPath);
+  },
+  async loadNextMoveCollection(path: string): Promise<string> {
+    return await ipcRenderer.invoke(Background.LOAD_NEXT_MOVE_COLLECTION, path);
+  },
+  async saveNextMoveCollection(path: string, json: string): Promise<void> {
+    await ipcRenderer.invoke(Background.SAVE_NEXT_MOVE_COLLECTION, path, json);
+  },
+  async loadNextMoveGenerationSettings(): Promise<string> {
+    return await ipcRenderer.invoke(Background.LOAD_NEXT_MOVE_GENERATION_SETTINGS);
+  },
+  async saveNextMoveGenerationSettings(json: string): Promise<void> {
+    await ipcRenderer.invoke(Background.SAVE_NEXT_MOVE_GENERATION_SETTINGS, json);
+  },
+  async loadRecordFileHistory(): Promise<string> {
+    return await ipcRenderer.invoke(Background.LOAD_RECORD_FILE_HISTORY);
+  },
+  addRecordFileHistory(path: string): void {
+    ipcRenderer.send(Background.ADD_RECORD_FILE_HISTORY, path);
+  },
+  async clearRecordFileHistory(): Promise<void> {
+    ipcRenderer.invoke(Background.CLEAR_RECORD_FILE_HISTORY);
+  },
+  async saveRecordFileBackup(kif: string): Promise<void> {
+    await ipcRenderer.invoke(Background.SAVE_RECORD_FILE_BACKUP, kif);
+  },
+  async loadRecordFileBackup(name: string): Promise<string> {
+    return await ipcRenderer.invoke(Background.LOAD_RECORD_FILE_BACKUP, name);
+  },
+  onOpenRecord(callback: (path: string) => void): void {
+    ipcRenderer.on(Renderer.OPEN_RECORD, (_, path) => callback(path));
+  },
+
+  // Book
+  async showOpenBookDialog(): Promise<string> {
+    return await ipcRenderer.invoke(Background.SHOW_OPEN_BOOK_DIALOG);
+  },
+  async showSaveBookDialog(session: number, targetFormat?: BookFormat): Promise<string> {
+    return await ipcRenderer.invoke(Background.SHOW_SAVE_BOOK_DIALOG, session, targetFormat);
+  },
+  async clearBook(session: number, format?: BookFormat): Promise<void> {
+    return await ipcRenderer.invoke(Background.CLEAR_BOOK, session, format);
+  },
+  async openBook(session: number, path: string, json: string): Promise<void> {
+    await ipcRenderer.invoke(Background.OPEN_BOOK, session, path, json);
+  },
+  async openBookAsNewSession(path: string, json: string): Promise<number> {
+    return await ipcRenderer.invoke(Background.OPEN_BOOK_AS_NEW_SESSION, path, json);
+  },
+  async closeBookSession(session: number): Promise<void> {
+    return await ipcRenderer.invoke(Background.CLOSE_BOOK_SESSION, session);
+  },
+  async saveBook(session: number, path: string): Promise<void> {
+    return await ipcRenderer.invoke(Background.SAVE_BOOK, session, path);
+  },
+  async exportBook(session: number, path: string, targetFormat: BookFormat): Promise<void> {
+    return await ipcRenderer.invoke(Background.EXPORT_BOOK, session, path, targetFormat);
+  },
+  async getBookFormat(session: number): Promise<BookFormat> {
+    return await ipcRenderer.invoke(Background.GET_BOOK_FORMAT, session);
+  },
+  async getBookInfo(session: number): Promise<string> {
+    return await ipcRenderer.invoke(Background.GET_BOOK_INFO, session);
+  },
+  async searchBookMoves(session: number, sfen: string): Promise<string> {
+    return await ipcRenderer.invoke(Background.SEARCH_BOOK_MOVES, session, sfen);
+  },
+  async searchBookEntry(session: number, sfen: string): Promise<string> {
+    return await ipcRenderer.invoke(Background.SEARCH_BOOK_ENTRY, session, sfen);
+  },
+  async updateBookMove(session: number, sfen: string, json: string): Promise<void> {
+    return await ipcRenderer.invoke(Background.UPDATE_BOOK_MOVE, session, sfen, json);
+  },
+  async updateBookPositionComment(session: number, sfen: string, comment: string): Promise<void> {
+    return await ipcRenderer.invoke(
+      Background.UPDATE_BOOK_POSITION_COMMENT,
+      session,
+      sfen,
+      comment,
+    );
+  },
+  async removeBookMove(session: number, sfen: string, usi: string): Promise<void> {
+    return await ipcRenderer.invoke(Background.REMOVE_BOOK_MOVE, session, sfen, usi);
+  },
+  async updateBookMoveOrder(
+    session: number,
+    sfen: string,
+    usi: string,
+    order: number,
+  ): Promise<void> {
+    return await ipcRenderer.invoke(Background.UPDATE_BOOK_MOVE_ORDER, session, sfen, usi, order);
+  },
+  async importBookMoves(session: number, json: string): Promise<string> {
+    return await ipcRenderer.invoke(Background.IMPORT_BOOK_MOVES, session, json);
+  },
+
+  // USI
+  async showSelectUSIEngineDialog(): Promise<string> {
+    return await ipcRenderer.invoke(Background.SHOW_SELECT_USI_ENGINE_DIALOG);
+  },
+  async getUSIEngineInfo(path: string, timeoutSeconds: number): Promise<string> {
+    return await ipcRenderer.invoke(Background.GET_USI_ENGINE_INFO, path, timeoutSeconds);
+  },
+  async getUSIEngineMetadata(path: string): Promise<string> {
+    return await ipcRenderer.invoke(Background.GET_USI_ENGINE_METADATA, path);
+  },
+  async sendUSIOptionButtonSignal(
+    path: string,
+    name: string,
+    timeoutSeconds: number,
+  ): Promise<void> {
+    await ipcRenderer.invoke(Background.SEND_USI_OPTION_BUTTON_SIGNAL, path, name, timeoutSeconds);
+  },
+  async usiLaunch(json: string, json2: string): Promise<number> {
+    return await ipcRenderer.invoke(Background.LAUNCH_USI, json, json2);
+  },
+  async usiReady(sessionID: number): Promise<void> {
+    await ipcRenderer.invoke(Background.USI_READY, sessionID);
+  },
+  async usiSetOption(sessionID: number, name: string, value: string): Promise<void> {
+    await ipcRenderer.invoke(Background.USI_SET_OPTION, sessionID, name, value);
+  },
+  async usiGo(sessionID: number, usi: string, timeStatesJSON: string): Promise<void> {
+    await ipcRenderer.invoke(Background.USI_GO, sessionID, usi, timeStatesJSON);
+  },
+  async usiGoPonder(sessionID: number, usi: string, timeStatesJSON: string): Promise<void> {
+    await ipcRenderer.invoke(Background.USI_GO_PONDER, sessionID, usi, timeStatesJSON);
+  },
+  async usiPonderHit(sessionID: number, timeStatesJSON: string): Promise<void> {
+    await ipcRenderer.invoke(Background.USI_GO_PONDER_HIT, sessionID, timeStatesJSON);
+  },
+  async usiGoInfinite(sessionID: number, usi: string): Promise<void> {
+    await ipcRenderer.invoke(Background.USI_GO_INFINITE, sessionID, usi);
+  },
+  async usiGoMate(sessionID: number, usi: string, maxSeconds?: number): Promise<void> {
+    await ipcRenderer.invoke(Background.USI_GO_MATE, sessionID, usi, maxSeconds);
+  },
+  async usiStop(sessionID: number): Promise<void> {
+    await ipcRenderer.invoke(Background.USI_STOP, sessionID);
+  },
+  async usiGameover(sessionID: number, result: GameResult): Promise<void> {
+    await ipcRenderer.invoke(Background.USI_GAMEOVER, sessionID, result);
+  },
+  async usiQuit(sessionID: number): Promise<void> {
+    await ipcRenderer.invoke(Background.USI_QUIT, sessionID);
+  },
+  onUSIBestMove(
+    callback: (sessionID: number, usi: string, usiMove: string, ponder?: string) => void,
+  ): void {
+    ipcRenderer.on(Renderer.USI_BEST_MOVE, (_, sessionID, usi, usiMove, ponder) => {
+      callback(sessionID, usi, usiMove, ponder);
+    });
+  },
+  onUSICheckmate(callback: (sessionID: number, usi: string, moves: string[]) => void): void {
+    ipcRenderer.on(Renderer.USI_CHECKMATE, (_, sessionID, usi, moves) => {
+      callback(sessionID, usi, moves);
+    });
+  },
+  onUSICheckmateNotImplemented(callback: (sessionID: number) => void): void {
+    ipcRenderer.on(Renderer.USI_CHECKMATE_NOT_IMPLEMENTED, (_, sessionID) => {
+      callback(sessionID);
+    });
+  },
+  onUSICheckmateTimeout(callback: (sessionID: number, usi: string) => void): void {
+    ipcRenderer.on(Renderer.USI_CHECKMATE_TIMEOUT, (_, sessionID, usi) => {
+      callback(sessionID, usi);
+    });
+  },
+  onUSINoMate(callback: (sessionID: number, usi: string) => void): void {
+    ipcRenderer.on(Renderer.USI_NO_MATE, (_, sessionID, usi) => {
+      callback(sessionID, usi);
+    });
+  },
+  onUSIInfo(callback: (sessionID: number, usi: string, json: string) => void): void {
+    ipcRenderer.on(Renderer.USI_INFO, (_, sessionID, usi, json) => {
+      callback(sessionID, usi, json);
+    });
+  },
+
+  // CSA
+  async csaLogin(json: string): Promise<number> {
+    return await ipcRenderer.invoke(Background.CSA_LOGIN, json);
+  },
+  async csaLogout(sessionID: number): Promise<void> {
+    return await ipcRenderer.invoke(Background.CSA_LOGOUT, sessionID);
+  },
+  async csaAgree(sessionID: number, gameID: string): Promise<void> {
+    return await ipcRenderer.invoke(Background.CSA_AGREE, sessionID, gameID);
+  },
+  async csaMove(sessionID: number, move: string, score?: number, pv?: string): Promise<void> {
+    return await ipcRenderer.invoke(Background.CSA_MOVE, sessionID, move, score, pv);
+  },
+  async csaResign(sessionID: number): Promise<void> {
+    return await ipcRenderer.invoke(Background.CSA_RESIGN, sessionID);
+  },
+  async csaWin(sessionID: number): Promise<void> {
+    return await ipcRenderer.invoke(Background.CSA_WIN, sessionID);
+  },
+  async csaStop(sessionID: number): Promise<void> {
+    return await ipcRenderer.invoke(Background.CSA_STOP, sessionID);
+  },
+  onCSAGameSummary(callback: (sessionID: number, gameSummary: string) => void): void {
+    ipcRenderer.on(Renderer.CSA_GAME_SUMMARY, (_, sessionID, gameSummary) => {
+      callback(sessionID, gameSummary);
+    });
+  },
+  onCSAReject(callback: (sessionID: number) => void): void {
+    ipcRenderer.on(Renderer.CSA_REJECT, (_, sessionID) => {
+      callback(sessionID);
+    });
+  },
+  onCSAStart(callback: (sessionID: number, playerStates: string) => void): void {
+    ipcRenderer.on(Renderer.CSA_START, (_, sessionID, playerStates) => {
+      callback(sessionID, playerStates);
+    });
+  },
+  onCSAMove(callback: (sessionID: number, mvoe: string, playerStates: string) => void): void {
+    ipcRenderer.on(Renderer.CSA_MOVE, (_, sessionID, move, playerStates) => {
+      callback(sessionID, move, playerStates);
+    });
+  },
+  onCSAGameResult(
+    callback: (sessionID: number, specialMove: CSASpecialMove, gameResult: CSAGameResult) => void,
+  ): void {
+    ipcRenderer.on(Renderer.CSA_GAME_RESULT, (_, sessionID, specialMove, gameResult) => {
+      callback(sessionID, specialMove, gameResult);
+    });
+  },
+  onCSAClose(callback: (sessionID: number) => void): void {
+    ipcRenderer.on(Renderer.CSA_CLOSE, (_, sessionID) => {
+      callback(sessionID);
+    });
+  },
+
+  // Sessions
+  async collectSessionStates(): Promise<string> {
+    return await ipcRenderer.invoke(Background.COLLECT_SESSION_STATES);
+  },
+  async setupPrompt(target: PromptTarget, sessionID: number): Promise<string> {
+    return await ipcRenderer.invoke(Background.SETUP_PROMPT, target, sessionID);
+  },
+  openPrompt(target: PromptTarget, sessionID: number, name: string): void {
+    ipcRenderer.send(Background.OPEN_PROMPT, target, sessionID, name);
+  },
+  invokePromptCommand(
+    target: PromptTarget,
+    sessionID: number,
+    type: CommandType,
+    command: string,
+  ): void {
+    ipcRenderer.send(Background.INVOKE_PROMPT_COMMAND, target, sessionID, type, command);
+  },
+  onPromptCommand(callback: (command: string) => void): void {
+    ipcRenderer.on(Renderer.PROMPT_COMMAND, (_, command) => {
+      callback(command);
+    });
+  },
+
+  // Images
+  async showSelectImageDialog(defaultURL?: string): Promise<string> {
+    return await ipcRenderer.invoke(Background.SHOW_SELECT_IMAGE_DIALOG, defaultURL);
+  },
+  async cropPieceImage(srcURL: string, deleteMargin: boolean): Promise<string> {
+    return await ipcRenderer.invoke(Background.CROP_PIECE_IMAGE, srcURL, deleteMargin);
+  },
+  async exportCaptureAsPNG(json: string): Promise<void> {
+    await ipcRenderer.invoke(Background.EXPORT_CAPTURE_AS_PNG, json);
+  },
+  async exportCaptureAsJPEG(json: string): Promise<void> {
+    await ipcRenderer.invoke(Background.EXPORT_CAPTURE_AS_JPEG, json);
+  },
+
+  // Layout
+  async loadLayoutProfileList(): Promise<[string, string]> {
+    return await ipcRenderer.invoke(Background.LOAD_LAYOUT_PROFILE_LIST);
+  },
+  updateLayoutProfileList(uri: string, profileList: string): void {
+    ipcRenderer.send(Background.UPDATE_LAYOUT_PROFILE_LIST, uri, profileList);
+  },
+  onUpdateLayoutProfile(callback: (json: string | null) => void): void {
+    ipcRenderer.on(Renderer.UPDATE_LAYOUT_PROFILE, (_, json) => {
+      callback(json);
+    });
+  },
+  async createDesktopShortcutForLayoutProfile(uri: string, name: string) {
+    await ipcRenderer.invoke(Background.CREATE_DESKTOP_SHORTCUT_FOR_LAYOUT_PROFILE, uri, name);
+  },
+
+  // Log
+  openLogFile(logType: LogType): void {
+    ipcRenderer.send(Background.OPEN_LOG_FILE, logType);
+  },
+  log(level: LogLevel, message: string): void {
+    ipcRenderer.send(Background.LOG, level, message);
+  },
+
+  // MISC
+  async showSelectFileDialog(): Promise<string> {
+    return await ipcRenderer.invoke(Background.SHOW_SELECT_FILE_DIALOG);
+  },
+  async showSelectDirectoryDialog(defaultPath?: string): Promise<string> {
+    return await ipcRenderer.invoke(Background.SHOW_SELECT_DIRECTORY_DIALOG, defaultPath);
+  },
+  openExplorer(path: string) {
+    ipcRenderer.send(Background.OPEN_EXPLORER, path);
+  },
+  openWebBrowser(url: string) {
+    ipcRenderer.send(Background.OPEN_WEB_BROWSER, url);
+  },
+  async getMachineSpec(): Promise<string> {
+    return await ipcRenderer.invoke(Background.GET_MACHINE_SPEC);
+  },
+  async isEncryptionAvailable(): Promise<boolean> {
+    return await ipcRenderer.invoke(Background.IS_ENCRYPTION_AVAILABLE);
+  },
+  async getVersionStatus(): Promise<string> {
+    return await ipcRenderer.invoke(Background.GET_VERSION_STATUS);
+  },
+  async checkUpdates(): Promise<void> {
+    await ipcRenderer.invoke(Background.CHECK_UPDATES);
+  },
+  getPathForFile(file: File): string {
+    return webUtils.getPathForFile(file);
+  },
+  onProgress(callback: (progress: number) => void): void {
+    ipcRenderer.on(Renderer.PROGRESS, (_, progress) => {
+      callback(progress);
+    });
+  },
+};
+
+contextBridge.exposeInMainWorld("electronShogiAPI", api);

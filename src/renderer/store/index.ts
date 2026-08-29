@@ -1,0 +1,1891 @@
+import api, { isNative } from "@/renderer/ipc/api.js";
+import {
+  Color,
+  exportCSA,
+  ImmutableRecord,
+  Move,
+  formatSpecialMove,
+  exportKIF,
+  RecordMetadataKey,
+  ImmutablePosition,
+  DoMoveOption,
+  SpecialMoveType,
+  exportKI2,
+  RecordFormatType,
+  exportJKFString,
+  countJishogiDeclarationPoint,
+  judgeJishogiDeclaration,
+  JishogiDeclarationRule,
+  countJishogiPoint,
+  Position,
+  exportBOD,
+  InitialPositionType,
+  ImmutableNode,
+} from "tsshogi";
+import { reactive, UnwrapNestedRefs } from "vue";
+import { defaultGameSettings, GameSettings } from "@/common/settings/game.js";
+import { ClockSoundTarget, Tab, TextDecodingRule } from "@/common/settings/app.js";
+import { beepShort, beepUnlimited, playPieceBeat, stopBeep } from "@/renderer/devices/audio.js";
+import { SearchInfoSenderType, SearchInfo as SearchInfoParam } from "@/common/record/types.js";
+import {
+  RecordManager,
+  ChangePositionHandler,
+  UpdateCustomDataHandler,
+  UpdateTreeHandler,
+} from "@/renderer/record/manager.js";
+import { GameManager } from "@/renderer/game/game.js";
+import { calculateGameStatistics, GameResults, SPRTSummary } from "@/renderer/game/result.js";
+import { CSAGameManager, CSAGameState } from "@/renderer/game/csa.js";
+import { Clock } from "@/renderer/game/clock.js";
+import { generateRecordFileName, join } from "@/renderer/helpers/path.js";
+import { ResearchSettings } from "@/common/settings/research.js";
+import { USIPlayerMonitor, USIMonitor } from "./usi.js";
+import { AppState, ResearchState } from "@/common/control/state.js";
+import { useMessageStore } from "./message.js";
+import { AnalysisManager } from "./analysis.js";
+import { AnalysisSettings } from "@/common/settings/analysis.js";
+import {
+  BatchAnalysisManager,
+  BatchAnalysisProgress,
+  BatchAnalysisResult,
+} from "./batch_analysis.js";
+import { BatchAnalysisSettings } from "@/common/settings/batch_analysis.js";
+import { MateSearchSettings } from "@/common/settings/mate.js";
+import { LogLevel } from "@/common/log.js";
+import { CSAGameSettings, appendCSAGameSettingsHistory } from "@/common/settings/csa.js";
+import { defaultPlayerBuilder } from "@/renderer/players/builder.js";
+import { USIInfoCommand } from "@/common/game/usi.js";
+import { ResearchManager } from "./research.js";
+import { SearchInfo } from "@/renderer/players/player.js";
+import { useAppSettings } from "./settings.js";
+import { t } from "@/common/i18n/index.js";
+import { MateSearchManager } from "./mate.js";
+import { detectUnsupportedRecordProperties } from "@/renderer/helpers/record.js";
+import {
+  RecordFileFormat,
+  detectRecordFileFormatByPath,
+  getStandardRecordFileFormats,
+} from "@/common/file/record.js";
+import { setOnStartSearchHandler, setOnUpdateUSIInfoHandler } from "@/renderer/players/usi.js";
+import { useErrorStore } from "./error.js";
+import { useBusyState } from "./busy.js";
+import { Confirmation, useConfirmationStore } from "./confirm.js";
+import { LayoutProfile } from "@/common/settings/layout.js";
+import { clearURLParams, loadRecordForWebApp, saveRecordForWebApp } from "./webapp.js";
+import { CommentBehavior } from "@/common/settings/comment.js";
+import { Attachment, ListItem } from "@/common/message.js";
+import { ParallelGameManager, ParallelGameProgress } from "@/renderer/game/parallel.js";
+import {
+  NextMoveGenerationManager,
+  NextMoveGenerationProgress,
+  NextMoveGenerationSummary,
+  useNextMoveQuizStore,
+} from "./nextmove.js";
+import { NextMoveGenerationSettings } from "@/common/settings/nextmove.js";
+import { NextMoveCollection } from "@/common/nextmove/collection.js";
+import { RecitationState } from "@/common/recitation/recitation.js";
+
+type CandidateMove = {
+  move: Move;
+  score?: number; // 手番側視点の数値スコア（showArrowScore が有効な場合のみ設定）
+};
+
+export type AnalysisDialogTarget = "record" | "batch";
+
+export type PVPreview = {
+  position: ImmutablePosition;
+  engineName?: string;
+  multiPV?: number;
+  depth?: number;
+  selectiveDepth?: number;
+  score?: number;
+  mate?: number;
+  lowerBound?: boolean;
+  upperBound?: boolean;
+  pv: Move[];
+  flip?: boolean;
+};
+
+function getMessageAttachmentsByGameResults(
+  results: GameResults,
+  sprtSummary?: SPRTSummary,
+): Attachment[] {
+  const statistics = calculateGameStatistics(results);
+  const items: ListItem[] = [
+    {
+      text: results.player1.name,
+      children: [
+        `${t.wins}: ${results.player1.win}`,
+        `${t.winsOnBlack}: ${results.player1.winBlack}`,
+        `${t.winsOnWhite}: ${results.player1.winWhite}`,
+      ],
+    },
+    {
+      text: results.player2.name,
+      children: [
+        `${t.wins}: ${results.player2.win}`,
+        `${t.winsOnBlack}: ${results.player2.winBlack}`,
+        `${t.winsOnWhite}: ${results.player2.winWhite}`,
+      ],
+    },
+    { text: `${t.draws}: ${results.draw}` },
+    { text: `${t.validGames}: ${results.total - results.invalid}` },
+    { text: `${t.invalidGames}: ${results.invalid}` },
+    {
+      text: `${t.eloRatingDiff} (${t.ignoreDraws})`,
+      children: [
+        `${statistics.rating.toFixed(2)}`,
+        `95% CI: [${statistics.ratingLower.toFixed(1)}, ${statistics.ratingUpper.toFixed(1)}]`,
+      ],
+    },
+  ];
+  if (sprtSummary) {
+    items.push({
+      text: "SPRT",
+      children: [
+        `Elo0=${sprtSummary.elo0.toFixed(2)}, Elo1=${sprtSummary.elo1.toFixed(2)}`,
+        `alpha=${sprtSummary.alpha}, beta=${sprtSummary.beta}`,
+        `5-nomial=[${sprtSummary.pentanomial.loseLose}, ${sprtSummary.pentanomial.loseDraw}, ${sprtSummary.pentanomial.drawDrawOrWinLose}, ${sprtSummary.pentanomial.winDraw}, ${sprtSummary.pentanomial.winWin}]`,
+        `LLR=${sprtSummary.llr.toFixed(4)} [${sprtSummary.lowerBound.toFixed(4)}, ${sprtSummary.upperBound.toFixed(4)}]`,
+        sprtSummary.result,
+      ],
+    });
+  } else {
+    items.push({
+      text: "二項検定", // TODO: i18n
+      children: [
+        `np > 5: ${statistics.npIsGreaterThan5 ? "True" : "False"}`,
+        `${t.zValue}: ${statistics.zValue.toFixed(2)}`,
+        `${t.significance5pc}: ${statistics.significance5pc ? "True" : "False"}`,
+        `${t.significance1pc}: ${statistics.significance1pc ? "True" : "False"}`,
+      ],
+    });
+  }
+  return [{ type: "list", items }];
+}
+
+class Store {
+  private recordManager = new RecordManager(loadRecordForWebApp());
+  private _appState = AppState.NORMAL;
+  private _customLayout: LayoutProfile | null = null;
+  private _isAppSettingsDialogVisible = false;
+  private _pvPreview?: PVPreview;
+  private usiMonitor = new USIMonitor();
+  private blackClock = new Clock();
+  private whiteClock = new Clock();
+  private gameManager = new GameManager(this.recordManager, this.blackClock, this.whiteClock);
+  private parallelGameManager = new ParallelGameManager();
+  private _parallelGameProgress?: ParallelGameProgress;
+  private _gameSettings: GameSettings = defaultGameSettings();
+  private csaGameManager = new CSAGameManager(this.recordManager, this.blackClock, this.whiteClock);
+  private analysisManager = new AnalysisManager(this.recordManager);
+  // 連続解析で次のファイルを開くと棋譜が差し替わるが、生の RecordManager を渡すと
+  // この変更が Vue に伝わらず、盤面や棋譜の表示が前のファイルのまま更新されない。
+  // 変更を伝えるには reactive proxy 経由でメソッドを呼ぶ必要があるため、
+  // ストアが公開するものと同じプロキシを渡す。
+  private batchAnalysisManager = new BatchAnalysisManager(
+    reactive(this.recordManager) as RecordManager,
+  );
+  private _batchAnalysisProgress?: BatchAnalysisProgress;
+  private _analysisDialogTarget: AnalysisDialogTarget = "record";
+  private mateSearchManager = new MateSearchManager();
+  private nextMoveGenerationManager = new NextMoveGenerationManager();
+  private _nextMoveGenerationProgress?: NextMoveGenerationProgress;
+  private nextMoveGenerationSettings?: NextMoveGenerationSettings;
+  private _researchState = ResearchState.IDLE;
+  private researchManager = new ResearchManager();
+  private recitationState?: RecitationState;
+  private _reactive: UnwrapNestedRefs<Store>;
+  private garbledNotified = false;
+  private onChangePositionHandlers: ChangePositionHandler[] = [];
+  private onUpdateRecordTreeHandlers: UpdateTreeHandler[] = [];
+  private onUpdateCustomDataHandlers: UpdateCustomDataHandler[] = [];
+
+  constructor() {
+    const refs = reactive(this);
+    this._reactive = refs;
+    this.recordManager
+      .on("changePosition", () => {
+        this.onChangePositionHandlers.forEach((handler) => handler());
+        saveRecordForWebApp(this.record);
+        this.updateResearchPosition();
+      })
+      .on("updateTree", () => {
+        this.onUpdateRecordTreeHandlers.forEach((handler) => handler());
+        saveRecordForWebApp(this.record);
+        clearURLParams();
+      })
+      .on("updateComment", () => {
+        saveRecordForWebApp(this.record);
+      })
+      .on("updateBookmark", () => {
+        saveRecordForWebApp(this.record);
+      })
+      .on("updateCustomData", () => {
+        this.onUpdateCustomDataHandlers.forEach((handler) => handler());
+        saveRecordForWebApp(this.record);
+      })
+      .on("backup", () => {
+        return {
+          returnCode: useAppSettings().returnCode,
+        };
+      });
+    this.gameManager
+      .on("saveRecord", this.onSaveRecord.bind(refs))
+      .on("closed", this.onGameClosed.bind(refs))
+      .on("flipBoard", this.onFlipBoard.bind(refs))
+      .on("pieceBeat", () => playPieceBeat(useAppSettings().pieceVolume))
+      .on("beepShort", this.onBeepShort.bind(refs))
+      .on("beepUnlimited", this.onBeepUnlimited.bind(refs))
+      .on("stopBeep", stopBeep)
+      .on("error", (e) => {
+        useErrorStore().add(e);
+      });
+    this.parallelGameManager
+      .on("progress", this.onParallelGameProgress.bind(refs))
+      .on("saveRecord", this.onSaveRecord.bind(refs))
+      .on("closed", this.onParallelGameClosed.bind(refs))
+      .on("error", (e) => {
+        useErrorStore().add(e);
+      });
+    this.csaGameManager
+      .on("saveRecord", this.onSaveRecord.bind(refs))
+      .on("closed", this.onCSAGameClosed.bind(refs))
+      .on("flipBoard", this.onFlipBoard.bind(refs))
+      .on("pieceBeat", () => playPieceBeat(useAppSettings().pieceVolume))
+      .on("beepShort", this.onBeepShort.bind(refs))
+      .on("beepUnlimited", this.onBeepUnlimited.bind(refs))
+      .on("stopBeep", stopBeep)
+      .on("error", (e) => {
+        useErrorStore().add(e);
+      });
+    this.researchManager
+      .on("updateSearchInfo", this.onUpdateSearchInfo.bind(refs))
+      .on("error", (e) => {
+        useErrorStore().add(e);
+      });
+    this.analysisManager.on("finish", this.onFinish.bind(refs)).on("error", (e) => {
+      useErrorStore().add(e);
+    });
+    this.batchAnalysisManager
+      .on("finish", this.onBatchAnalysisFinish.bind(refs))
+      .on("progress", this.onBatchAnalysisProgress.bind(refs))
+      .on("error", (e) => {
+        useErrorStore().add(e);
+      });
+    this.mateSearchManager
+      .on("checkmate", this.onCheckmate.bind(refs))
+      .on("notImplemented", this.onNotImplemented.bind(refs))
+      .on("noMate", this.onNoMate.bind(refs))
+      .on("error", this.onCheckmateError.bind(refs));
+    this.nextMoveGenerationManager
+      .on("progress", this.onNextMoveGenerationProgress.bind(refs))
+      .on("finish", this.onNextMoveGenerationFinish.bind(refs))
+      .on("error", (e) => {
+        useErrorStore().add(e);
+      });
+    setOnStartSearchHandler(this.endUSIIteration.bind(refs));
+    setOnUpdateUSIInfoHandler(this.updateUSIInfo.bind(refs));
+  }
+
+  addEventListener(event: "changePosition", handler: ChangePositionHandler): void;
+  addEventListener(event: "updateRecordTree", handler: UpdateTreeHandler): void;
+  addEventListener(event: "updateCustomData", handler: UpdateCustomDataHandler): void;
+  addEventListener(event: string, handler: unknown): void {
+    switch (event) {
+      case "changePosition":
+        this.onChangePositionHandlers.push(handler as ChangePositionHandler);
+        break;
+      case "updateRecordTree":
+        this.onUpdateRecordTreeHandlers.push(handler as UpdateTreeHandler);
+        break;
+      case "updateCustomData":
+        this.onUpdateCustomDataHandlers.push(handler as UpdateCustomDataHandler);
+        break;
+    }
+  }
+
+  removeEventListener(event: "changePosition", handler: ChangePositionHandler): void;
+  removeEventListener(event: "updateRecordTree", handler: UpdateTreeHandler): void;
+  removeEventListener(event: "updateCustomData", handler: UpdateCustomDataHandler): void;
+  removeEventListener(event: string, handler: unknown): void {
+    switch (event) {
+      case "changePosition":
+        this.onChangePositionHandlers = this.onChangePositionHandlers.filter((h) => h !== handler);
+        break;
+      case "updateRecordTree":
+        this.onUpdateRecordTreeHandlers = this.onUpdateRecordTreeHandlers.filter(
+          (h) => h !== handler,
+        );
+        break;
+      case "updateCustomData":
+        this.onUpdateCustomDataHandlers = this.onUpdateCustomDataHandlers.filter(
+          (h) => h !== handler,
+        );
+        break;
+    }
+  }
+
+  get reactive(): UnwrapNestedRefs<Store> {
+    return this._reactive;
+  }
+
+  get record(): ImmutableRecord {
+    return this.recordManager.record;
+  }
+
+  get recordFilePath(): string | undefined {
+    return this.recordManager.recordFilePath;
+  }
+
+  get isRecordFileUnsaved(): boolean {
+    return this.recordManager.unsaved;
+  }
+
+  get inCommentPVs(): Move[][] {
+    return this.recordManager.inCommentPVs;
+  }
+
+  get positionCounts(): ReadonlyMap<string, number> {
+    return this.recordManager.positionCounts;
+  }
+
+  updateStandardRecordMetadata(update: { key: RecordMetadataKey; value: string }): void {
+    this.recordManager.updateStandardMetadata(update);
+  }
+
+  appendSearchComment(
+    type: SearchInfoSenderType,
+    searchInfo: SearchInfoParam,
+    behavior: CommentBehavior,
+    options?: {
+      header?: string;
+      engineName?: string;
+    },
+  ): void {
+    const appSettings = useAppSettings();
+    this.recordManager.appendSearchComment(
+      type,
+      appSettings.searchCommentFormat,
+      searchInfo,
+      behavior,
+      options,
+    );
+  }
+
+  appendMovesSilently(moves: Move[], opt?: DoMoveOption): number {
+    return this.recordManager.appendMovesSilently(moves, opt);
+  }
+
+  get appState(): AppState {
+    return this._appState;
+  }
+
+  get researchState(): ResearchState {
+    return this._researchState;
+  }
+
+  get customLayout() {
+    return this._customLayout;
+  }
+
+  updateLayoutProfile(layout: LayoutProfile | null): void {
+    this._customLayout = layout;
+  }
+
+  get pvPreview(): PVPreview | undefined {
+    return this._pvPreview;
+  }
+
+  showPVPreviewDialog(pvPreview: PVPreview): void {
+    this._pvPreview = pvPreview;
+  }
+
+  closePVPreviewDialog(): void {
+    this._pvPreview = undefined;
+  }
+
+  showPasteDialog(mode: "standard" | "mergeIntoRoot" | "mergeIntoCurrent" = "standard"): void {
+    if (this.appState !== AppState.NORMAL) {
+      return;
+    }
+    const appSettings = useAppSettings();
+    if ((mode === "standard" && appSettings.showPasteDialog) || !isNative()) {
+      this._appState = AppState.PASTE_DIALOG;
+    } else {
+      navigator.clipboard.readText().then((text) => {
+        this.pasteRecord(text, mode);
+      });
+    }
+  }
+
+  showGameDialog(): void {
+    if (this.appState === AppState.NORMAL) {
+      this._appState = AppState.GAME_DIALOG;
+    }
+  }
+
+  showCSAGameDialog(): void {
+    if (this.appState === AppState.NORMAL) {
+      this._appState = AppState.CSA_GAME_DIALOG;
+    }
+  }
+
+  showAnalysisDialog(target?: AnalysisDialogTarget): void {
+    if (this.appState === AppState.NORMAL) {
+      this._analysisDialogTarget = target || "record";
+      this._appState = AppState.ANALYSIS_DIALOG;
+    }
+  }
+
+  get analysisDialogTarget(): AnalysisDialogTarget {
+    return this._analysisDialogTarget;
+  }
+
+  showMateSearchDialog(): void {
+    if (this.appState === AppState.NORMAL) {
+      this._appState = AppState.MATE_SEARCH_DIALOG;
+    }
+  }
+
+  showUsiEngineManagementDialog(): void {
+    if (this.appState === AppState.NORMAL) {
+      this._appState = AppState.USI_ENGINES_DIALOG;
+    }
+  }
+
+  showRecordFileHistoryDialog(): void {
+    if (this.appState === AppState.NORMAL) {
+      this._appState = AppState.RECORD_FILE_HISTORY_DIALOG;
+    }
+  }
+
+  showBatchConversionDialog(): void {
+    if (this.appState === AppState.NORMAL) {
+      this._appState = AppState.BATCH_CONVERSION_DIALOG;
+    }
+  }
+
+  showExportBoardImageDialog() {
+    if (this.appState === AppState.NORMAL) {
+      this._appState = AppState.EXPORT_POSITION_IMAGE_DIALOG;
+    }
+  }
+
+  showLaunchUSIEngineDialog(): void {
+    if (this.appState === AppState.NORMAL) {
+      this._appState = AppState.LAUNCH_USI_ENGINE_DIALOG;
+    }
+  }
+
+  showConnectToCSAServerDialog(): void {
+    if (this.appState === AppState.NORMAL) {
+      this._appState = AppState.CONNECT_TO_CSA_SERVER_DIALOG;
+    }
+  }
+
+  showLoadRemoteFileDialog(): void {
+    if (this.appState === AppState.NORMAL) {
+      this._appState = AppState.LOAD_REMOTE_FILE_DIALOG;
+    }
+  }
+
+  showShareDialog(): void {
+    if (this.appState === AppState.NORMAL) {
+      this._appState = AppState.SHARE_DIALOG;
+    }
+  }
+
+  showAddBookMovesDialog(): void {
+    if (this.appState === AppState.NORMAL) {
+      this._appState = AppState.ADD_BOOK_MOVES_DIALOG;
+    }
+  }
+
+  showResetBookDialog(): void {
+    if (this.appState === AppState.NORMAL) {
+      this._appState = AppState.RESET_BOOK_DIALOG;
+    }
+  }
+
+  showBookPropertiesDialog(): void {
+    if (this.appState === AppState.NORMAL) {
+      this._appState = AppState.BOOK_PROPERTIES_DIALOG;
+    }
+  }
+
+  showSearchDuplicatePositionsDialog(): void {
+    if (this.appState === AppState.NORMAL) {
+      this._appState = AppState.SEARCH_DUPLICATE_POSITIONS_DIALOG;
+    }
+  }
+
+  showElapsedTimeChartDialog(): void {
+    if (this.appState === AppState.NORMAL) {
+      this._appState = AppState.ELAPSED_TIME_CHART_DIALOG;
+    }
+  }
+
+  destroyModalDialog(): void {
+    if (
+      this.appState === AppState.PASTE_DIALOG ||
+      this.appState === AppState.GAME_DIALOG ||
+      this.appState === AppState.CSA_GAME_DIALOG ||
+      this.appState === AppState.ANALYSIS_DIALOG ||
+      this.appState === AppState.MATE_SEARCH_DIALOG ||
+      this.appState === AppState.USI_ENGINES_DIALOG ||
+      this.appState === AppState.EXPORT_POSITION_IMAGE_DIALOG ||
+      this.appState === AppState.RECORD_FILE_HISTORY_DIALOG ||
+      this.appState === AppState.BATCH_CONVERSION_DIALOG ||
+      this.appState === AppState.LAUNCH_USI_ENGINE_DIALOG ||
+      this.appState === AppState.CONNECT_TO_CSA_SERVER_DIALOG ||
+      this.appState === AppState.LOAD_REMOTE_FILE_DIALOG ||
+      this.appState === AppState.SHARE_DIALOG ||
+      this.appState === AppState.ADD_BOOK_MOVES_DIALOG ||
+      this.appState === AppState.RESET_BOOK_DIALOG ||
+      this.appState === AppState.BOOK_PROPERTIES_DIALOG ||
+      this.appState === AppState.SEARCH_DUPLICATE_POSITIONS_DIALOG ||
+      this.appState === AppState.ELAPSED_TIME_CHART_DIALOG ||
+      this.appState === AppState.NEXT_MOVE_GENERATION_DIALOG
+    ) {
+      this._appState = AppState.NORMAL;
+    }
+  }
+
+  closeModalDialog(): void {
+    if (!useBusyState().isBusy) {
+      this.destroyModalDialog();
+    }
+  }
+
+  get isAppSettingsDialogVisible(): boolean {
+    return this._isAppSettingsDialogVisible;
+  }
+
+  showAppSettingsDialog(): void {
+    this._isAppSettingsDialogVisible = true;
+  }
+
+  closeAppSettingsDialog(): void {
+    this._isAppSettingsDialogVisible = false;
+  }
+
+  get usiMonitors(): USIPlayerMonitor[] {
+    return this.usiMonitor.sessions;
+  }
+
+  get candidates(): CandidateMove[] {
+    const appSettings = useAppSettings();
+    const maxScoreDiff = appSettings.arrowScoreDiffRange;
+    const sfen = this.recordManager.record.position.sfen;
+    // 優先度1: 検討の第1エンジン（研究セッションの中で最小の sessionID）
+    // 優先度2: 対局中の手番側エンジン（ポンダー中でないセッション）
+    // 評価値ラベルはこのセッションのみ表示する。他のセッションは矢印のみ表示する。
+    const preferredSession =
+      this.usiMonitor.sessions.find((s) => this.researchManager.isSessionExists(s.sessionID)) ||
+      this.usiMonitor.sessions.find((s) => !s.ponderMove);
+    const candidates: CandidateMove[] = [];
+    const usiSet = new Set<string>();
+    // 優先セッションを先頭に並べ替え、同一手の重複除去で優先セッションが先に登録されるようにする
+    const orderedSessions = preferredSession
+      ? [preferredSession, ...this.usiMonitor.sessions.filter((s) => s !== preferredSession)]
+      : this.usiMonitor.sessions;
+    for (const session of orderedSessions) {
+      if (session.ponderMove) {
+        continue;
+      }
+      const isPreferred = session === preferredSession;
+      let entryCount = 0;
+      let maxScore = -Infinity;
+      for (const info of session.latestInfo) {
+        if (entryCount >= appSettings.maxArrowsPerEngine) {
+          break;
+        }
+        if (info.multiPV && info.multiPV > appSettings.maxArrowsPerEngine) {
+          break;
+        }
+        if (!info.pv?.length) {
+          continue;
+        }
+        const score =
+          info.score !== undefined
+            ? info.score
+            : info.scoreMate
+              ? info.scoreMate > 0
+                ? 1e8 - info.scoreMate
+                : -1e8 - info.scoreMate
+              : undefined;
+        if (score !== undefined) {
+          if (score < maxScore - maxScoreDiff) {
+            continue;
+          } else if (score > maxScore) {
+            maxScore = score;
+          }
+        }
+        const usi = info.pv[0];
+        if (usiSet.has(usi)) {
+          continue;
+        }
+        if (info.position !== sfen) {
+          continue;
+        }
+        const pos = Position.newBySFEN(info.position);
+        if (!pos) {
+          continue;
+        }
+        const move = pos.createMoveByUSI(usi);
+        if (!move || !pos.doMove(move)) {
+          continue;
+        }
+        const candidateScore = isPreferred && appSettings.showArrowScore ? score : undefined;
+        candidates.push({ move, score: candidateScore });
+        usiSet.add(usi);
+        entryCount++;
+      }
+    }
+    return candidates;
+  }
+
+  isPausedResearchEngine(sessionID: number): boolean {
+    return this.researchManager.isPaused(sessionID);
+  }
+
+  pauseResearchEngine(sessionID: number): void {
+    this.researchManager.pause(sessionID);
+  }
+
+  unpauseResearchEngine(sessionID: number): void {
+    this.researchManager.unpause(sessionID);
+  }
+
+  getResearchMultiPV(sessionID: number): number | undefined {
+    return this.researchManager.getMultiPV(sessionID);
+  }
+
+  setResearchMultiPV(sessionID: number, multiPV: number): void {
+    this.researchManager.setMultiPV(sessionID, multiPV);
+  }
+
+  endUSIIteration(sessionID: number): void {
+    this.usiMonitor.endIteration(sessionID);
+  }
+
+  updateUSIInfo(
+    sessionID: number,
+    position: ImmutablePosition,
+    name: string,
+    info: USIInfoCommand,
+    ponderMove?: Move,
+  ): void {
+    if (this.appState === AppState.PARALLEL_GAME) {
+      return;
+    }
+    const appSettings = useAppSettings();
+    this.usiMonitor.update(
+      sessionID,
+      position,
+      name,
+      info,
+      appSettings.maxPVTextLength,
+      ponderMove,
+    );
+  }
+
+  get blackTime(): number {
+    return this.blackClock.time;
+  }
+
+  get blackByoyomi(): number {
+    return this.blackClock.byoyomi;
+  }
+
+  get whiteTime(): number {
+    return this.whiteClock.time;
+  }
+
+  get whiteByoyomi(): number {
+    return this.whiteClock.byoyomi;
+  }
+
+  startGame(settings: GameSettings): void {
+    if (useBusyState().isBusy) {
+      return;
+    }
+    if (this.appState !== AppState.NORMAL && this.appState !== AppState.GAME_DIALOG) {
+      return;
+    }
+    useBusyState().retain();
+    api
+      .saveGameSettings(settings)
+      .then(async () => {
+        this._gameSettings = settings;
+        const appSettings = useAppSettings();
+        if (settings.parallelism >= 2 || settings.sprtEnabled) {
+          this._parallelGameProgress = undefined;
+          const playerBuilder = defaultPlayerBuilder({
+            timeoutSeconds: appSettings.engineTimeoutSeconds,
+            discardUSIInfo: !settings.enableComment,
+          });
+          this._appState = AppState.PARALLEL_GAME; // info コマンドの表示を抑制するために start より前に state を変更する。
+          await this.parallelGameManager.start(settings, playerBuilder);
+        } else {
+          const playerBuilder = defaultPlayerBuilder({
+            timeoutSeconds: appSettings.engineTimeoutSeconds,
+          });
+          this._appState = AppState.GAME;
+          await this.gameManager.startLinear(settings, playerBuilder);
+        }
+      })
+      .catch((e) => {
+        useErrorStore().add(e);
+        this._appState = AppState.NORMAL;
+      })
+      .finally(() => {
+        useBusyState().release();
+      });
+  }
+
+  get gameSettings(): GameSettings {
+    return this._gameSettings;
+  }
+
+  get gameResults(): GameResults {
+    return this.gameManager.results;
+  }
+
+  get csaGameState(): CSAGameState {
+    return this.csaGameManager.state;
+  }
+
+  get csaServerSessionID(): number {
+    return this.csaGameManager.sessionID;
+  }
+
+  get csaGameSettings(): CSAGameSettings {
+    return this.csaGameManager.settings;
+  }
+
+  get usiSessionIDs(): number[] {
+    if (this.appState == AppState.CSA_GAME) {
+      return [this.csaGameManager.usiSessionID].filter((id) => id);
+    }
+    return [];
+  }
+
+  loginCSAGame(settings: CSAGameSettings, opt: { saveHistory: boolean }): void {
+    if (this.appState !== AppState.CSA_GAME_DIALOG || useBusyState().isBusy) {
+      return;
+    }
+    useBusyState().retain();
+    Promise.resolve()
+      .then(async () => {
+        if (opt.saveHistory) {
+          const latestHistory = await api.loadCSAGameSettingsHistory();
+          const history = appendCSAGameSettingsHistory(latestHistory, settings);
+          await api.saveCSAGameSettingsHistory(history);
+        }
+      })
+      .then(() => {
+        const appSettings = useAppSettings();
+        const builder = defaultPlayerBuilder({
+          timeoutSeconds: appSettings.engineTimeoutSeconds,
+        });
+        return this.csaGameManager.login(settings, builder);
+      })
+      .then(() => (this._appState = AppState.CSA_GAME))
+      .catch((e) => {
+        useErrorStore().add(e);
+      })
+      .finally(() => {
+        useBusyState().release();
+      });
+  }
+
+  cancelCSAGame(): void {
+    if (this.appState !== AppState.CSA_GAME) {
+      return;
+    }
+    if (this.csaGameManager.state === CSAGameState.GAME) {
+      useErrorStore().add("対局が始まっているため通信対局をキャンセルできませんでした。"); // TODO: i18n
+      return;
+    }
+    this.csaGameManager.logout();
+    this._appState = AppState.NORMAL;
+  }
+
+  stopGame(): void {
+    switch (this.appState) {
+      case AppState.GAME:
+        // 連続対局の場合は確認ダイアログを表示する。
+        if (this.gameSettings.repeat >= 2) {
+          this.showConfirmation({
+            message: t.areYouSureWantToQuitGames,
+            onOk: () => this.gameManager.stop(),
+          });
+        } else {
+          this.gameManager.stop();
+        }
+        break;
+      case AppState.PARALLEL_GAME:
+        this.showConfirmation({
+          message: t.areYouSureWantToQuitGames,
+          onOk: () => this.parallelGameManager.stop(),
+        });
+        break;
+      case AppState.CSA_GAME:
+        // 確認ダイアログを表示する。
+        this.showConfirmation({
+          message: t.areYouSureWantToRequestQuit,
+          onOk: () => this.csaGameManager.stop(),
+        });
+        break;
+    }
+  }
+
+  showGameResults(): void {
+    if (this.appState !== AppState.GAME) {
+      return;
+    }
+    const results = this.gameManager.results;
+    useMessageStore().enqueue({
+      text: t.gameProgress,
+      attachments: getMessageAttachmentsByGameResults(results),
+      withCopyButton: true,
+    });
+  }
+
+  get parallelGameProgress(): ParallelGameProgress | undefined {
+    return this._parallelGameProgress;
+  }
+
+  private onParallelGameProgress(progress: ParallelGameProgress): void {
+    this._parallelGameProgress = progress;
+  }
+
+  private onGameClosed(results: GameResults, specialMoveType?: SpecialMoveType): void {
+    if (this.appState !== AppState.GAME) {
+      return;
+    }
+    api.log(LogLevel.INFO, `game end: ${JSON.stringify(results)}`);
+    if (results && results.total >= 2) {
+      useMessageStore().enqueue({
+        text: t.allGamesCompleted,
+        attachments: getMessageAttachmentsByGameResults(results),
+        withCopyButton: true,
+      });
+    } else if (specialMoveType) {
+      useMessageStore().enqueue({
+        text: `${t.gameEnded}（${formatSpecialMove(specialMoveType, this.record.current.nextColor)})`,
+      });
+    }
+    this._appState = AppState.NORMAL;
+  }
+
+  private onParallelGameClosed(results: GameResults, sprtSummary?: SPRTSummary): void {
+    if (this.appState !== AppState.PARALLEL_GAME) {
+      return;
+    }
+    useMessageStore().enqueue({
+      text: t.allGamesCompleted,
+      attachments: getMessageAttachmentsByGameResults(results, sprtSummary),
+      withCopyButton: true,
+    });
+    this._appState = AppState.NORMAL;
+  }
+
+  private onCSAGameClosed(): void {
+    if (this.appState !== AppState.CSA_GAME) {
+      return;
+    }
+    this._appState = AppState.NORMAL;
+  }
+
+  private onFlipBoard(flip: boolean): void {
+    const appSettings = useAppSettings();
+    if (appSettings.boardFlipping !== flip) {
+      useAppSettings().flipBoard();
+    }
+  }
+
+  private onSaveRecord(dir: string, recordManager: RecordManager = this.recordManager): void {
+    const appSettings = useAppSettings();
+    const fname = generateRecordFileName(recordManager.record, {
+      template: appSettings.recordFileNameTemplate,
+      extension: appSettings.defaultRecordFileFormat,
+    });
+    const path = join(dir, fname);
+    this.saveRecordByPath(path, { recordManager }).catch((e) => {
+      useErrorStore().add(e);
+    });
+  }
+
+  private onBeepShort(): void {
+    const appSettings = useAppSettings();
+    if (appSettings.clockSoundTarget === ClockSoundTarget.ONLY_USER && !this.isMovableByUser) {
+      return;
+    }
+    // An exception may be thrown if the audio API is not supported.
+    try {
+      beepShort({
+        frequency: appSettings.clockPitch,
+        volume: appSettings.clockVolume,
+      });
+    } catch (e) {
+      useErrorStore().add(e);
+    }
+  }
+
+  private onBeepUnlimited(): void {
+    const appSettings = useAppSettings();
+    if (appSettings.clockSoundTarget === ClockSoundTarget.ONLY_USER && !this.isMovableByUser) {
+      return;
+    }
+    // An exception may be thrown if the audio API is not supported.
+    try {
+      beepUnlimited({
+        frequency: appSettings.clockPitch,
+        volume: appSettings.clockVolume,
+      });
+    } catch (e) {
+      useErrorStore().add(e);
+    }
+  }
+
+  doMove(move: Move): void {
+    if (this.appState !== AppState.NORMAL) {
+      return;
+    }
+    if (!this.recordManager.appendMove({ move })) {
+      return;
+    }
+    const appSettings = useAppSettings();
+    // An exception may be thrown if the audio API is not supported.
+    try {
+      playPieceBeat(appSettings.pieceVolume);
+    } catch (e) {
+      useErrorStore().add(e);
+    }
+  }
+
+  private onFinish(): void {
+    if (this.appState === AppState.ANALYSIS) {
+      useMessageStore().enqueue({ text: "棋譜解析が終了しました。" });
+      this._appState = AppState.NORMAL;
+    }
+  }
+
+  showResearchDialog(): void {
+    if (this._researchState === ResearchState.IDLE) {
+      this._researchState = ResearchState.STARTUP_DIALOG;
+    }
+  }
+
+  closeResearchDialog(): void {
+    if (this._researchState === ResearchState.STARTUP_DIALOG) {
+      this._researchState = ResearchState.IDLE;
+    }
+  }
+
+  startResearch(researchSettings: ResearchSettings): void {
+    if (this._researchState !== ResearchState.STARTUP_DIALOG || useBusyState().isBusy) {
+      return;
+    }
+    useBusyState().retain();
+    if (!researchSettings.usi) {
+      useErrorStore().add(new Error("エンジンが設定されていません。"));
+      return;
+    }
+    api
+      .saveResearchSettings(researchSettings)
+      .then(() => this.researchManager.launch(researchSettings))
+      .then(() => {
+        this._researchState = ResearchState.RUNNING;
+        this.updateResearchPosition();
+        const appSettings = useAppSettings();
+        if (
+          appSettings.tab !== Tab.SEARCH &&
+          appSettings.tab !== Tab.PV &&
+          appSettings.tab !== Tab.CHART &&
+          appSettings.tab !== Tab.PERCENTAGE_CHART &&
+          appSettings.tab !== Tab.MONITOR
+        ) {
+          useAppSettings().updateAppSettings({ tab: Tab.PV });
+        }
+      })
+      .catch((e) => {
+        useErrorStore().add("検討の初期化中にエラーが出ました: " + e);
+      })
+      .finally(() => {
+        useBusyState().release();
+      });
+  }
+
+  stopResearch(): void {
+    if (this._researchState !== ResearchState.RUNNING) {
+      return;
+    }
+    this.researchManager.close();
+    this._researchState = ResearchState.IDLE;
+  }
+
+  isResearchEngineSessionID(sessionID: number): boolean {
+    return this.researchManager.isSessionExists(sessionID);
+  }
+
+  private onUpdateSearchInfo(type: SearchInfoSenderType, info: SearchInfo): void {
+    this.recordManager.updateSearchInfo(type, info);
+  }
+
+  startAnalysis(analysisSettings: AnalysisSettings): void {
+    if (this.appState !== AppState.ANALYSIS_DIALOG || useBusyState().isBusy) {
+      return;
+    }
+    useBusyState().retain();
+    api
+      .saveAnalysisSettings(analysisSettings)
+      .then(() => this.analysisManager.start(analysisSettings))
+      .then(() => {
+        this._appState = AppState.ANALYSIS;
+      })
+      .catch((e) => {
+        useErrorStore().add("検討の初期化中にエラーが出ました: " + e);
+      })
+      .finally(() => {
+        useBusyState().release();
+      });
+  }
+
+  stopAnalysis(): void {
+    if (this.appState !== AppState.ANALYSIS) {
+      return;
+    }
+    this.analysisManager.close();
+    this._appState = AppState.NORMAL;
+  }
+
+  startBatchAnalysis(
+    batchAnalysisSettings: BatchAnalysisSettings,
+    analysisSettings: AnalysisSettings,
+  ): void {
+    if (this.appState !== AppState.ANALYSIS_DIALOG || useBusyState().isBusy) {
+      return;
+    }
+    useBusyState().retain();
+    Promise.all([
+      api.saveBatchAnalysisSettings(batchAnalysisSettings),
+      api.saveAnalysisSettings(analysisSettings),
+    ])
+      .then(() => this.batchAnalysisManager.start(batchAnalysisSettings, analysisSettings))
+      .then(() => {
+        this._batchAnalysisProgress = undefined;
+        this._appState = AppState.BATCH_ANALYSIS;
+      })
+      .catch((e) => {
+        useErrorStore().add("連続棋譜解析の初期化中にエラーが出ました: " + e); // TODO: i18n
+      })
+      .finally(() => {
+        useBusyState().release();
+      });
+  }
+
+  stopBatchAnalysis(): void {
+    if (this.appState !== AppState.BATCH_ANALYSIS) {
+      return;
+    }
+    this.batchAnalysisManager.stop();
+  }
+
+  get batchAnalysisProgress(): BatchAnalysisProgress | undefined {
+    return this._batchAnalysisProgress;
+  }
+
+  private onBatchAnalysisProgress(progress: BatchAnalysisProgress): void {
+    this._batchAnalysisProgress = progress;
+  }
+
+  private onBatchAnalysisFinish(result: BatchAnalysisResult): void {
+    if (this.appState !== AppState.BATCH_ANALYSIS) {
+      return;
+    }
+    useMessageStore().enqueue({
+      text: t.analysisCompleted,
+      attachments: [
+        {
+          type: "list",
+          items: [
+            { text: `${t.success}: ${t.totalNumber(result.successTotal)}` },
+            { text: `${t.failed}: ${t.totalNumber(result.failedTotal)}` },
+            { text: `${t.skipped}: ${t.totalNumber(result.skippedTotal)}` },
+          ],
+        },
+      ],
+    });
+    this._batchAnalysisProgress = undefined;
+    this._appState = AppState.NORMAL;
+  }
+
+  startMateSearch(mateSearchSettings: MateSearchSettings): void {
+    if (this.appState !== AppState.MATE_SEARCH_DIALOG || useBusyState().isBusy) {
+      return;
+    }
+    useBusyState().retain();
+    if (!mateSearchSettings.usi) {
+      useErrorStore().add(new Error(t.engineNotSelected));
+      return;
+    }
+    api
+      .saveMateSearchSettings(mateSearchSettings)
+      .then(() => this.mateSearchManager.start(mateSearchSettings, this.recordManager.record))
+      .then(() => {
+        this._appState = AppState.MATE_SEARCH;
+        const appSettings = useAppSettings();
+        if (appSettings.tab !== Tab.SEARCH && appSettings.tab !== Tab.PV) {
+          useAppSettings().updateAppSettings({ tab: Tab.SEARCH });
+        }
+      })
+      .catch((e) => {
+        useErrorStore().add(e);
+      })
+      .finally(() => {
+        useBusyState().release();
+      });
+  }
+
+  stopMateSearch(): void {
+    if (this.appState !== AppState.MATE_SEARCH) {
+      return;
+    }
+    this.mateSearchManager.close();
+    this._appState = AppState.NORMAL;
+  }
+
+  get nextMoveGenerationProgress(): NextMoveGenerationProgress | undefined {
+    return this._nextMoveGenerationProgress;
+  }
+
+  showNextMoveGenerationDialog(): void {
+    if (this.appState === AppState.NORMAL) {
+      this._appState = AppState.NEXT_MOVE_GENERATION_DIALOG;
+    }
+  }
+
+  startNextMoveGeneration(settings: NextMoveGenerationSettings): void {
+    if (this.appState !== AppState.NEXT_MOVE_GENERATION_DIALOG || useBusyState().isBusy) {
+      return;
+    }
+    useBusyState().retain();
+    api
+      .saveNextMoveGenerationSettings(settings)
+      .then(() => this.nextMoveGenerationManager.start(settings))
+      .then(() => {
+        this.nextMoveGenerationSettings = settings;
+        this._nextMoveGenerationProgress = undefined;
+        this._appState = AppState.NEXT_MOVE_GENERATION;
+      })
+      .catch((e) => {
+        useErrorStore().add("次の一手問題集の作成の初期化中にエラーが出ました: " + e); // TODO: i18n
+      })
+      .finally(() => {
+        useBusyState().release();
+      });
+  }
+
+  stopNextMoveGeneration(): void {
+    if (this.appState !== AppState.NEXT_MOVE_GENERATION) {
+      return;
+    }
+    this.nextMoveGenerationManager.stop();
+  }
+
+  get recitation(): RecitationState | undefined {
+    return this.recitationState;
+  }
+
+  get isRecitationActive(): boolean {
+    return this.appState === AppState.RECITATION;
+  }
+
+  /** 背譜モードを開始します。現在の棋譜の本譜を暗記対象とします。 */
+  startRecitation(): void {
+    if (this.appState !== AppState.NORMAL) {
+      return;
+    }
+    let state: RecitationState;
+    try {
+      state = new RecitationState(this.recordManager.mutableRecord);
+    } catch (e) {
+      useErrorStore().add(e);
+      return;
+    }
+    this.recitationState = state;
+    this._appState = AppState.RECITATION;
+  }
+
+  /** 背譜モードを終了し、背譜開始前の局面に復元します。 */
+  stopRecitation(): void {
+    if (this.appState !== AppState.RECITATION) {
+      return;
+    }
+    this.recitationState?.dispose();
+    this.recitationState = undefined;
+    this._appState = AppState.NORMAL;
+  }
+
+  private onNextMoveGenerationProgress(progress: NextMoveGenerationProgress): void {
+    this._nextMoveGenerationProgress = progress;
+  }
+
+  private onNextMoveGenerationFinish(
+    collection: NextMoveCollection,
+    summary: NextMoveGenerationSummary,
+  ): void {
+    this._appState = AppState.NORMAL;
+    this._nextMoveGenerationProgress = undefined;
+    const settings = this.nextMoveGenerationSettings;
+    if (!settings) {
+      return;
+    }
+    if (collection.problems.length === 0) {
+      useErrorStore().add(
+        `${t.noProblemsWereGeneratedAndFileWasNotCreated} (${this.nextMoveGenerationSummaryText(summary)})`,
+      );
+      return;
+    }
+    const save = () => {
+      api
+        .saveNextMoveCollection(settings.destinationFile, collection)
+        .then(() => {
+          // 保存した問題集をそのまま出題できるように確認を出す。
+          this.showConfirmation({
+            message: [
+              t.nextMoveGenerationCompleted,
+              this.nextMoveGenerationSummaryText(summary),
+              settings.destinationFile,
+              t.doYouWantToStartQuiz,
+            ].join("\n"),
+            buttonType: "yesNo",
+            onOk: () => {
+              useNextMoveQuizStore().open(collection, settings.destinationFile, false);
+            },
+          });
+        })
+        .catch((e) => {
+          useErrorStore().add(e);
+        });
+    };
+    if (summary.aborted) {
+      // 中断した場合はそれまでに採用した問題を保存するかどうかを確認する。
+      this.showConfirmation({
+        message: t.doYouWantToSaveNProblems(collection.problems.length),
+        buttonType: "yesNo",
+        onOk: save,
+      });
+    } else {
+      save();
+    }
+  }
+
+  private nextMoveGenerationSummaryText(summary: NextMoveGenerationSummary): string {
+    return (
+      `${t.files}: ${summary.totalFiles} (${t.skipped}: ${summary.skippedFiles})` +
+      ` / ${t.blunderCandidates}: ${summary.blunderCount}` +
+      ` / ${t.adoptedProblems}: ${summary.adoptedCount}`
+    );
+  }
+
+  openNextMoveQuiz(): void {
+    if (this.appState !== AppState.NORMAL || useBusyState().isBusy) {
+      return;
+    }
+    // 中断中のセッションがあれば続きから再開するかどうかを確認する。
+    if (useNextMoveQuizStore().isActive) {
+      this.showConfirmation({
+        message: t.doYouWantToResumeFromWhereYouLeftOff,
+        buttonType: "yesNo",
+        onOk: () => {
+          useNextMoveQuizStore().resume();
+        },
+        onCancel: () => {
+          this.selectAndOpenNextMoveQuiz();
+        },
+      });
+      return;
+    }
+    this.selectAndOpenNextMoveQuiz();
+  }
+
+  private selectAndOpenNextMoveQuiz(): void {
+    if (this.appState !== AppState.NORMAL || useBusyState().isBusy) {
+      return;
+    }
+    useBusyState().retain();
+    api
+      .showOpenNextMoveCollectionDialog()
+      .then((path) => {
+        if (!path) {
+          return;
+        }
+        return api.loadNextMoveCollection(path).then((collection) => {
+          useNextMoveQuizStore().open(collection, path, false);
+        });
+      })
+      .catch((e) => {
+        useErrorStore().add(e);
+      })
+      .finally(() => {
+        useBusyState().release();
+      });
+  }
+
+  private onCheckmate(moves: Move[]): void {
+    if (this.appState !== AppState.MATE_SEARCH) {
+      return;
+    }
+    this._appState = AppState.NORMAL;
+    const position = this.recordManager.record.position;
+    this.showConfirmation({
+      message: t.mateInNPlyDoYouWantToDisplay(moves.length),
+      onOk: () => {
+        this.showPVPreviewDialog({
+          position,
+          mate: moves.length,
+          pv: moves,
+        });
+      },
+    });
+  }
+
+  private onNotImplemented(): void {
+    if (this.appState !== AppState.MATE_SEARCH) {
+      return;
+    }
+    useErrorStore().add(new Error(t.thisEngineNotSupportsMateSearch));
+    this._appState = AppState.NORMAL;
+  }
+
+  private onNoMate(): void {
+    if (this.appState !== AppState.MATE_SEARCH) {
+      return;
+    }
+    useMessageStore().enqueue({ text: t.noMateFound });
+    this._appState = AppState.NORMAL;
+  }
+
+  private onCheckmateError(e: unknown): void {
+    if (this.appState !== AppState.MATE_SEARCH) {
+      return;
+    }
+    useErrorStore().add(e);
+    this._appState = AppState.NORMAL;
+  }
+
+  private updateResearchPosition(): void {
+    this.researchManager?.updatePosition(this.recordManager.record);
+  }
+
+  resetRecord(mode: "keepRootPosition" | "hirateSetup" = "keepRootPosition"): void {
+    if (this.appState != AppState.NORMAL) {
+      return;
+    }
+    this.showConfirmation({
+      message: t.areYouSureWantToClearRecord,
+      onOk: () => {
+        switch (mode) {
+          case "keepRootPosition":
+            this.recordManager.reset();
+            break;
+          case "hirateSetup":
+            this.recordManager.resetByInitialPositionType(InitialPositionType.STANDARD);
+            break;
+        }
+      },
+    });
+  }
+
+  updateRecordComment(comment: string): void {
+    this.recordManager.updateComment(comment);
+  }
+
+  updateRecordBookmark(bookmark: string): void {
+    this.recordManager.updateBookmark(bookmark);
+  }
+
+  insertSpecialMove(specialMoveType: SpecialMoveType): void {
+    if (this.appState !== AppState.NORMAL) {
+      return;
+    }
+    this.recordManager.appendMove({ move: specialMoveType });
+  }
+
+  showPositionEditingDialog(): void {
+    if (this.appState !== AppState.NORMAL) {
+      return;
+    }
+    this._appState = AppState.POSITION_EDITING_DIALOG;
+  }
+
+  closePositionEditingDialog(position?: ImmutablePosition): void {
+    if (this.appState !== AppState.POSITION_EDITING_DIALOG) {
+      return;
+    }
+    if (!position) {
+      this._appState = AppState.NORMAL;
+      return;
+    }
+    this.showConfirmation({
+      message: t.areYouSureWantToClearRecord,
+      onOk: () => {
+        this.recordManager.resetByPosition(position);
+        this._appState = AppState.NORMAL;
+      },
+    });
+  }
+
+  initializePositionBySFEN(sfen: string): void {
+    if (this.appState === AppState.NORMAL) {
+      this.showConfirmation({
+        message: t.areYouSureWantToClearRecord,
+        onOk: () => {
+          this.recordManager.resetBySFEN(sfen);
+        },
+      });
+    }
+  }
+
+  goForward(): void {
+    if (this.appState === AppState.NORMAL || this.appState === AppState.ELAPSED_TIME_CHART_DIALOG) {
+      this.recordManager.goForward();
+    }
+  }
+
+  goBack(): void {
+    if (this.appState === AppState.NORMAL || this.appState === AppState.ELAPSED_TIME_CHART_DIALOG) {
+      this.recordManager.goBack();
+    }
+  }
+
+  changePly(ply: number): void {
+    if (this.appState === AppState.NORMAL || this.appState === AppState.ELAPSED_TIME_CHART_DIALOG) {
+      this.recordManager.changePly(ply);
+    }
+  }
+
+  changeBranch(index: number): void {
+    if (this.appState === AppState.NORMAL) {
+      this.recordManager.changeBranch(index);
+    }
+  }
+
+  changeNode(node: ImmutableNode): void {
+    if (this.appState === AppState.NORMAL) {
+      this.recordManager.changeNode(node);
+    }
+  }
+
+  swapWithNextBranch(): boolean {
+    return this.recordManager.swapWithNextBranch();
+  }
+
+  swapWithPreviousBranch(): boolean {
+    return this.recordManager.swapWithPreviousBranch();
+  }
+
+  backToMainBranch(): void {
+    if (this.appState === AppState.NORMAL) {
+      this.recordManager.resetAllBranchSelection();
+    }
+  }
+
+  removeCurrentMove(): void {
+    if (this.appState !== AppState.NORMAL) {
+      return;
+    }
+    if (this.recordManager.record.current.isLastMove) {
+      this.recordManager.removeCurrentMove();
+      return;
+    }
+    this.showConfirmation({
+      message: t.areYouSureWantToDeleteFollowingMove(this.recordManager.record.current.ply),
+      onOk: () => {
+        this.recordManager.removeCurrentMove();
+      },
+    });
+  }
+
+  jumpToBookmark(bookmark: string): boolean {
+    if (this.appState === AppState.NORMAL) {
+      return this.recordManager.jumpToBookmark(bookmark);
+    }
+    return false;
+  }
+
+  copyRecordKIF(options?: { fromCurrentPosition?: boolean }): void {
+    const appSettings = useAppSettings();
+    const record = options?.fromCurrentPosition
+      ? this.recordManager.record.getSubtree()
+      : this.recordManager.record;
+    const str = exportKIF(record, {
+      returnCode: appSettings.returnCode,
+    });
+    navigator.clipboard.writeText(str);
+  }
+
+  copyRecordKI2(options?: { fromCurrentPosition?: boolean }): void {
+    const appSettings = useAppSettings();
+    const record = options?.fromCurrentPosition
+      ? this.recordManager.record.getSubtree()
+      : this.recordManager.record;
+    const str = exportKI2(record, {
+      returnCode: appSettings.returnCode,
+    });
+    navigator.clipboard.writeText(str);
+  }
+
+  copyRecordCSA(options?: { fromCurrentPosition?: boolean }): void {
+    const appSettings = useAppSettings();
+    const record = options?.fromCurrentPosition
+      ? this.recordManager.record.getSubtree()
+      : this.recordManager.record;
+    const str = exportCSA(record, {
+      returnCode: appSettings.returnCode,
+      v3: appSettings.useCSAV3 ? { milliseconds: true } : undefined,
+    });
+    navigator.clipboard.writeText(str);
+  }
+
+  copyRecordUSI(target: "all" | "before" | "after"): void {
+    const appSettings = useAppSettings();
+    const record =
+      target === "after" ? this.recordManager.record.getSubtree() : this.recordManager.record;
+    const str = record.getUSI({
+      startpos: appSettings.enableUSIFileStartpos,
+      resign: appSettings.enableUSIFileSpecialMoves,
+      repDraw: appSettings.enableUSIFileSpecialMoves,
+      draw: appSettings.enableUSIFileSpecialMoves,
+      timeout: appSettings.enableUSIFileSpecialMoves,
+      break: appSettings.enableUSIFileSpecialMoves,
+      win: appSettings.enableUSIFileSpecialMoves,
+      allMoves: target !== "before",
+    });
+    navigator.clipboard.writeText(str);
+  }
+
+  copyRecordJKF(options?: { fromCurrentPosition?: boolean }): void {
+    const record = options?.fromCurrentPosition
+      ? this.recordManager.record.getSubtree()
+      : this.recordManager.record;
+    const str = exportJKFString(record);
+    navigator.clipboard.writeText(str);
+  }
+
+  copyRecordUSEN(options?: { fromCurrentPosition?: boolean }): void {
+    const record = options?.fromCurrentPosition
+      ? this.recordManager.record.getSubtree()
+      : this.recordManager.record;
+    const [usen] = record.usen;
+    navigator.clipboard.writeText(usen);
+  }
+
+  copyBoardSFEN(): void {
+    const str = this.recordManager.record.sfen;
+    navigator.clipboard.writeText(str);
+  }
+
+  copyBoardBOD(): void {
+    const str = exportBOD(this.recordManager.record);
+    navigator.clipboard.writeText(str);
+  }
+
+  pasteRecord(
+    data: string,
+    mode: "standard" | "mergeIntoRoot" | "mergeIntoCurrent" = "standard",
+  ): void {
+    if (this.appState !== AppState.NORMAL) {
+      return;
+    }
+    const error = this.recordManager.importRecord(data.trim(), { mode });
+    if (error) {
+      useErrorStore().add(error);
+      return;
+    }
+  }
+
+  openRecord(path?: string, opt?: { ply?: number }): void {
+    if (this.appState !== AppState.NORMAL || useBusyState().isBusy) {
+      useErrorStore().add(t.pleaseEndActiveFeaturesBeforeOpenRecord);
+      return;
+    }
+    useBusyState().retain();
+    Promise.resolve()
+      .then(() => {
+        return path || api.showOpenRecordDialog(getStandardRecordFileFormats());
+      })
+      .then((path) => {
+        if (!path) {
+          return;
+        }
+        const appSettings = useAppSettings();
+        const autoDetect = appSettings.textDecodingRule == TextDecodingRule.AUTO_DETECT;
+        return api.openRecord(path).then((data) => {
+          const e = this.recordManager.importRecordFromBuffer(data, path, {
+            autoDetect,
+          });
+          return e && Promise.reject(e);
+        });
+      })
+      .then(() => {
+        if (opt?.ply) {
+          this.recordManager.changePly(opt.ply);
+        }
+      })
+      .catch((e) => {
+        useErrorStore().add("棋譜の読み込み中にエラーが出ました: " + e); // TODO: i18n
+      })
+      .finally(() => {
+        useBusyState().release();
+      });
+  }
+
+  saveRecord(options?: { overwrite?: boolean; format?: RecordFileFormat }): void {
+    if (this.appState !== AppState.NORMAL || useBusyState().isBusy) {
+      return;
+    }
+    useBusyState().retain();
+    Promise.resolve()
+      .then(() => {
+        const path = this.recordManager.recordFilePath;
+        if (options?.overwrite && path) {
+          return path;
+        }
+        const appSettings = useAppSettings();
+        const defaultPath =
+          (!options?.format && path) ||
+          generateRecordFileName(this.recordManager.record, {
+            template: appSettings.recordFileNameTemplate,
+            extension: options?.format || appSettings.defaultRecordFileFormat,
+          });
+        return api.showSaveRecordDialog(defaultPath);
+      })
+      .then((path) => {
+        if (!path) {
+          return;
+        }
+        return this.saveRecordByPath(path, { detectGarbled: true }).then(() => {
+          const fileFormat = detectRecordFileFormatByPath(path) as RecordFileFormat;
+          const props = detectUnsupportedRecordProperties(this.recordManager.record, fileFormat);
+          const items = Object.entries(props)
+            .filter(([, v]) => v)
+            .map(([k]) => {
+              switch (k) {
+                case "branch":
+                  return t.branches;
+                case "comment":
+                  return t.comments;
+                case "bookmark":
+                  return t.bookmark;
+                case "time":
+                  return t.elapsedTime;
+              }
+            })
+            .map((v) => ({ text: v })) as ListItem[];
+          if (items.length) {
+            useMessageStore().enqueue({
+              text: t.followingDataNotSavedBecauseNotSupporetedBy(fileFormat),
+              attachments: [{ type: "list", items }],
+            });
+          }
+        });
+      })
+      .catch((e) => {
+        useErrorStore().add(e);
+      })
+      .finally(() => {
+        useBusyState().release();
+      });
+  }
+
+  private async saveRecordByPath(
+    path: string,
+    opt?: { detectGarbled?: boolean; recordManager?: RecordManager },
+  ): Promise<void> {
+    const appSettings = useAppSettings();
+    const recordManager = opt?.recordManager || this.recordManager;
+    const result = recordManager.exportRecordAsBuffer(path, {
+      returnCode: appSettings.returnCode,
+      detectGarbled: opt?.detectGarbled,
+      csa: { v3: appSettings.useCSAV3 },
+      useUTF8ForKifAndKi2: appSettings.useUTF8ForKifAndKi2,
+    });
+    if (result instanceof Error) {
+      throw result;
+    }
+    try {
+      await api.saveRecord(path, result.data);
+      if (result.garbled && !this.garbledNotified) {
+        useMessageStore().enqueue({
+          text: `${t.recordSavedWithGarbledCharacters}\n${t.pleaseConsiderToUseKIFU}\n${t.youCanChangeDefaultRecordFileFormatFromAppSettings}`,
+        });
+        this.garbledNotified = true;
+      }
+    } catch (e) {
+      throw new Error(`${t.failedToSaveRecord}: ${e}`);
+    }
+  }
+
+  restoreFromBackupV1(name: string): void {
+    if (this.appState !== AppState.RECORD_FILE_HISTORY_DIALOG || useBusyState().isBusy) {
+      return;
+    }
+    useBusyState().retain();
+    api
+      .loadRecordFileBackup(name)
+      .then((data) => {
+        const err = this.recordManager.importRecord(data, {
+          type: RecordFormatType.KIF,
+          markAsSaved: true,
+        });
+        if (err) {
+          return Promise.reject(err);
+        }
+        this._appState = AppState.NORMAL;
+      })
+      .catch((e) => {
+        useErrorStore().add(e);
+      })
+      .finally(() => {
+        useBusyState().release();
+      });
+  }
+
+  restoreFromBackupV2(kif: string): void {
+    if (this.appState !== AppState.RECORD_FILE_HISTORY_DIALOG || useBusyState().isBusy) {
+      return;
+    }
+    const err = this.recordManager.importRecord(kif, {
+      type: RecordFormatType.KIF,
+      markAsSaved: true,
+    });
+    if (err) {
+      useErrorStore().add(err);
+      return;
+    }
+    this._appState = AppState.NORMAL;
+  }
+
+  get remoteRecordFileURL() {
+    return this.recordManager.sourceURL;
+  }
+
+  loadRemoteRecordFile(url?: string) {
+    useBusyState().retain();
+    this.recordManager
+      .importRecordFromRemoteURL(url)
+      .catch((e) => useErrorStore().add(e))
+      .finally(() => useBusyState().release());
+  }
+
+  showJishogiPoints(): void {
+    const position = this.recordManager.record.position;
+    const blackTotalPoint = countJishogiPoint(position, Color.BLACK);
+    const blackPoint = countJishogiDeclarationPoint(position, Color.BLACK);
+    const black24 = judgeJishogiDeclaration(
+      JishogiDeclarationRule.GENERAL24,
+      position,
+      Color.BLACK,
+    );
+    const black27 = judgeJishogiDeclaration(
+      JishogiDeclarationRule.GENERAL27,
+      position,
+      Color.BLACK,
+    );
+    const whiteTotalPoint = countJishogiPoint(position, Color.WHITE);
+    const whitePoint = countJishogiDeclarationPoint(position, Color.WHITE);
+    const white24 = judgeJishogiDeclaration(
+      JishogiDeclarationRule.GENERAL24,
+      position,
+      Color.WHITE,
+    );
+    const white27 = judgeJishogiDeclaration(
+      JishogiDeclarationRule.GENERAL27,
+      position,
+      Color.WHITE,
+    );
+    useMessageStore().enqueue({
+      text: t.jishogiPoints,
+      attachments: [
+        {
+          type: "list",
+          items: [
+            {
+              text: t.sente,
+              children: [
+                `Points (Total): ${blackTotalPoint}`,
+                `Points (Declaration): ${blackPoint}`,
+                `Rule-24: ${black24.toUpperCase()}`,
+                `Rule-27: ${black27.toUpperCase()}`,
+              ],
+            },
+            {
+              text: t.gote,
+              children: [
+                `Points (Total): ${whiteTotalPoint}`,
+                `Points (Declaration): ${whitePoint}`,
+                `Rule-24: ${white24.toUpperCase()}`,
+                `Rule-27: ${white27.toUpperCase()}`,
+              ],
+            },
+          ],
+        },
+      ],
+      withCopyButton: true,
+    });
+  }
+
+  get isMovableByUser() {
+    switch (this.appState) {
+      case AppState.NORMAL:
+        return true;
+      case AppState.GAME:
+        return this.gameManager.waitingForHumanPlayerMove;
+      case AppState.CSA_GAME:
+        return this.csaGameManager.waitingForHumanPlayerMove;
+    }
+    return false;
+  }
+
+  async onMainWindowClose(): Promise<void> {
+    useBusyState().retain();
+    try {
+      await this.recordManager.saveBackup();
+    } finally {
+      useBusyState().release();
+    }
+  }
+
+  private showConfirmation(confirmation: Confirmation): void {
+    const lastAppState = this.appState;
+    useConfirmationStore().show({
+      ...confirmation,
+      onOk: () => {
+        if (this.appState !== lastAppState) {
+          useErrorStore().add("確認ダイアログ表示中に他の操作が行われたため処理が中止されました。"); // TODO: i18n
+          return;
+        }
+        confirmation.onOk();
+      },
+    });
+  }
+}
+
+export function createStore(): UnwrapNestedRefs<Store> {
+  return new Store().reactive;
+}
+
+let store: UnwrapNestedRefs<Store>;
+
+export function useStore(): UnwrapNestedRefs<Store> {
+  if (!store) {
+    store = createStore();
+  }
+  return store;
+}

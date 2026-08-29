@@ -1,0 +1,294 @@
+import readline from "node:readline";
+import { BatchConversionResult } from "@/common/file/conversion.js";
+import {
+  RecordFileFormat,
+  detectRecordFileFormatByPath,
+  exportRecordAsBuffer,
+  importRecordFromBuffer,
+} from "@/common/file/record.js";
+import {
+  BatchConversionSettings,
+  DestinationType,
+  FileNameConflictAction,
+  SourceType,
+} from "@/common/settings/conversion.js";
+import { createReadStream, promises as fs } from "node:fs";
+import path from "node:path";
+import { getAppLogger } from "@/background/log.js";
+import { AppSettings, TextDecodingRule } from "@/common/settings/app.js";
+import { exists } from "@/background/helpers/file.js";
+import { listRecordFiles } from "@/background/file/list.js";
+import { loadAppSettings } from "@/background/settings.js";
+import {
+  ImmutableNode,
+  ImmutableRecord,
+  InitialPositionSFEN,
+  Move,
+  Record,
+  SpecialMoveType,
+} from "tsshogi";
+import { resolveConflictFilePath } from "./filename.js";
+
+export async function convertRecordFiles(
+  settings: BatchConversionSettings,
+  onProgress?: (progress: number) => void,
+): Promise<BatchConversionResult> {
+  getAppLogger().debug(`batch conversion: start ${JSON.stringify(settings)}`);
+  switch (settings.sourceType) {
+    case SourceType.DIRECTORY:
+      return await convertFromDirectory(settings, onProgress);
+    case SourceType.SINGLE_FILE:
+      return await convertFromFile(settings, onProgress);
+  }
+}
+
+async function convertFromDirectory(
+  settings: BatchConversionSettings,
+  onProgress: ((progress: number) => void) | undefined,
+): Promise<BatchConversionResult> {
+  const appSettings = await loadAppSettings();
+  const result: BatchConversionResult = {
+    success: {},
+    successTotal: 0,
+    failed: {},
+    failedTotal: 0,
+    skipped: {},
+    skippedTotal: 0,
+  };
+
+  const sourceFiles = await listRecordFiles(
+    settings.source,
+    settings.sourceFormats,
+    settings.subdirectories,
+  );
+
+  const writer =
+    settings.destinationType === DestinationType.DIRECTORY
+      ? new DirectoryWriter(settings, appSettings)
+      : new SingleFileWriter(settings, appSettings);
+  await writer.open();
+  for (const source of sourceFiles) {
+    if (onProgress) {
+      const progress =
+        (result.successTotal + result.failedTotal + result.skippedTotal) / sourceFiles.length;
+      onProgress(progress);
+    }
+    const sourceFormat = detectRecordFileFormatByPath(source) as RecordFileFormat;
+    try {
+      const sourceData = await fs.readFile(source);
+      const record = importRecordFromBuffer(sourceData, sourceFormat, {
+        autoDetect: appSettings.textDecodingRule === TextDecodingRule.AUTO_DETECT,
+      });
+      if (record instanceof Error) {
+        throw record;
+      }
+      if (await writer.write(record, source)) {
+        result.successTotal++;
+        result.success[sourceFormat] = (result.success[sourceFormat] || 0) + 1;
+      } else {
+        result.skippedTotal++;
+        result.skipped[sourceFormat] = (result.skipped[sourceFormat] || 0) + 1;
+      }
+    } catch (e) {
+      result.failedTotal++;
+      result.failed[sourceFormat] = (result.failed[sourceFormat] || 0) + 1;
+      getAppLogger().debug(`batch conversion: failed: ${source}: ${e}`);
+    }
+  }
+  await writer.close();
+  getAppLogger().debug(`batch conversion: completed`);
+
+  return result;
+}
+
+async function convertFromFile(
+  settings: BatchConversionSettings,
+  onProgress: ((progress: number) => void) | undefined,
+): Promise<BatchConversionResult> {
+  const appSettings = await loadAppSettings();
+  const result: BatchConversionResult = {
+    success: {},
+    successTotal: 0,
+    failed: {},
+    failedTotal: 0,
+    skipped: {},
+    skippedTotal: 0,
+  };
+
+  const fileSize = (await fs.stat(settings.singleFileSource)).size;
+  const lineReader = readline.createInterface({
+    input: createReadStream(settings.singleFileSource),
+    crlfDelay: Infinity,
+  });
+
+  // Create directory if not exists
+  await fs.mkdir(settings.destination, { recursive: true });
+
+  let lineNo = 0;
+  let readBytes = 0;
+  for await (let line of lineReader) {
+    readBytes += Buffer.byteLength(line, "utf-8") + 1;
+    if (lineNo === 0) {
+      line = line.replace(/^\uFEFF/, "");
+    }
+
+    try {
+      const record = Record.newByUSI(line);
+      if (record instanceof Error) {
+        throw record;
+      }
+      const fileName = `record_${String(lineNo + 1).padStart(6, "0")}${settings.destinationFormat}`;
+      const destination = path.join(settings.destination, fileName);
+      const exportResult = exportRecordAsBuffer(record, settings.destinationFormat, {
+        returnCode: appSettings.returnCode,
+        csa: { v3: appSettings.useCSAV3 },
+        useUTF8ForKifAndKi2: appSettings.useUTF8ForKifAndKi2,
+      });
+
+      // Export record
+      await fs.writeFile(destination, exportResult.data);
+      getAppLogger().debug(`batch conversion: success: line ${lineNo + 1} -> ${destination}`);
+      result.successTotal++;
+    } catch (e) {
+      getAppLogger().debug(
+        `batch conversion: failed: line ${lineNo + 1} in ${settings.singleFileSource}: ${e}`,
+      );
+      result.failedTotal++;
+    } finally {
+      if (onProgress) {
+        onProgress(readBytes / fileSize);
+      }
+      lineNo++;
+    }
+  }
+  return result;
+}
+
+class DirectoryWriter {
+  constructor(
+    private settings: BatchConversionSettings,
+    private appSettings: AppSettings,
+  ) {}
+
+  async open(): Promise<void> {
+    // noop
+  }
+
+  async write(record: ImmutableRecord, source: string): Promise<boolean> {
+    // Generate destination path
+    const parsed = path.parse(path.relative(this.settings.source, source));
+    const name = parsed.name + this.settings.destinationFormat;
+    let destination = path.join(
+      this.settings.destination,
+      this.settings.createSubdirectories ? path.join(parsed.dir, name) : name,
+    );
+    if (await exists(destination)) {
+      switch (this.settings.fileNameConflictAction) {
+        case FileNameConflictAction.OVERWRITE:
+          break;
+        case FileNameConflictAction.NUMBER_SUFFIX:
+          destination = await resolveConflictFilePath(destination);
+          break;
+        case FileNameConflictAction.SKIP:
+          getAppLogger().debug(`batch conversion: skipped: ${source}`);
+          return false;
+      }
+    }
+
+    // Create directory if not exists
+    const destinationDir = path.dirname(destination);
+    await fs.mkdir(destinationDir, { recursive: true });
+
+    // Export record
+    const exportResult = exportRecordAsBuffer(record, this.settings.destinationFormat, {
+      returnCode: this.appSettings.returnCode,
+      csa: { v3: this.appSettings.useCSAV3 },
+      useUTF8ForKifAndKi2: this.appSettings.useUTF8ForKifAndKi2,
+    });
+    await fs.writeFile(destination, exportResult.data);
+    getAppLogger().debug(`batch conversion: success: ${source} -> ${destination}`);
+    return true;
+  }
+
+  async close(): Promise<void> {
+    // noop
+  }
+}
+
+class SingleFileWriter {
+  private fd?: fs.FileHandle;
+  constructor(
+    private settings: BatchConversionSettings,
+    private appSettings: AppSettings,
+  ) {}
+
+  async open(): Promise<void> {
+    this.fd = await fs.open(this.settings.singleFileDestination, "w");
+  }
+
+  async write(record: ImmutableRecord, source: string): Promise<boolean> {
+    await this.writeUSI(record);
+    getAppLogger().debug(`batch conversion: success: ${source}`);
+    return true;
+  }
+
+  async close(): Promise<void> {
+    await this.fd?.close();
+  }
+
+  async writeUSI(record: ImmutableRecord): Promise<void> {
+    let position: string;
+    const sfen = record.initialPosition.sfen;
+    if (this.appSettings.enableUSIFileStartpos && sfen === InitialPositionSFEN.STANDARD) {
+      position = "startpos";
+    } else {
+      position = "sfen " + sfen;
+    }
+    const branches = this.getUSIBranches(record);
+    for (const moves of branches) {
+      if (moves) {
+        await this.fd?.write(position + " moves" + moves + this.appSettings.returnCode);
+      } else {
+        await this.fd?.write(position + this.appSettings.returnCode);
+      }
+    }
+  }
+
+  getUSIBranches(record: ImmutableRecord): string[] {
+    const branches: string[] = [];
+    let moves = "";
+    let p: ImmutableNode = record.first;
+    const pos = record.initialPosition.clone();
+    const stack: [ImmutableNode, string][] = [];
+    while (true) {
+      if (p.next) {
+        stack.push([p, moves]);
+        if (p.move instanceof Move) {
+          pos.doMove(p.move);
+          moves += " " + p.move.usi;
+        }
+        p = p.next;
+        continue;
+      }
+      if (p.move instanceof Move) {
+        branches.push(moves + " " + p.move.usi);
+      } else if (this.settings.enableUSIResign && p.move.type === SpecialMoveType.RESIGN) {
+        branches.push(moves + " resign");
+      } else {
+        branches.push(moves);
+      }
+      while (!p.branch) {
+        const last = stack.pop();
+        if (!last) {
+          return branches;
+        }
+        if (last[0].move instanceof Move) {
+          pos.undoMove(last[0].move);
+        }
+        p = last[0];
+        moves = last[1];
+      }
+      p = p.branch;
+    }
+  }
+}

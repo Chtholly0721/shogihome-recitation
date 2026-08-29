@@ -1,0 +1,600 @@
+<template>
+  <div class="full column record-view" :class="{ limited: showTopControl }">
+    <div v-show="showTopControl" class="row control">
+      <button :disabled="!operational" :data-hotkey="shortcutKeys.Begin" @click="goBegin">
+        <Icon :icon="IconType.FIRST" />
+      </button>
+      <button :disabled="!operational" :data-hotkey="shortcutKeys.Back" @click="goBack()">
+        <Icon :icon="IconType.BACK" />
+      </button>
+      <button :disabled="!operational" :data-hotkey="shortcutKeys.Forward" @click="goForward">
+        <Icon :icon="IconType.NEXT" />
+      </button>
+      <button :disabled="!operational" :data-hotkey="shortcutKeys.End" @click="goEnd">
+        <Icon :icon="IconType.LAST" />
+      </button>
+    </div>
+    <div class="move-list-area">
+      <!-- NOTE: 背景だけを透過させるために背景専用の要素を作る。 -->
+      <div class="move-list-background" :style="{ opacity }"></div>
+      <div v-if="!showBranchTree" ref="moveList" class="move-list">
+        <div
+          v-for="move in record.moves"
+          :key="move.ply"
+          class="row move-element"
+          :class="{ 'has-branch': move.hasBranch, selected: move.ply === record.current.ply }"
+          @click="changePly(move.ply)"
+        >
+          <div class="move-number">
+            {{ move.ply !== 0 ? move.ply : "" }}
+          </div>
+          <div class="move-text">{{ move.displayText }}</div>
+          <div v-if="showElapsedTime" class="move-time">{{ move.ply ? move.timeText : "" }}</div>
+          <div v-if="showComment" class="move-comment">
+            <button
+              v-if="operational && (positionCounts.get(move.sfen) || 0) >= 2"
+              class="duplicate"
+              @click.stop="showDuplicatePositions(move.sfen)"
+            >
+              {{ t.duplicatePos }}
+            </button>
+            <span v-if="move.bookmark" class="bookmark">{{ move.bookmark }}</span>
+            {{ move.comment }}
+          </div>
+        </div>
+      </div>
+      <div v-else ref="moveList" class="move-list with-tree">
+        <div class="row move-list-content">
+          <div class="move-list-column">
+            <div
+              v-for="move in record.moves"
+              :key="move.ply"
+              class="row move-element"
+              :class="{ 'has-branch': move.hasBranch, selected: move.ply === record.current.ply }"
+              @click="changePly(move.ply)"
+            >
+              <div class="move-number">
+                {{ move.ply !== 0 ? move.ply : "" }}
+              </div>
+              <div class="move-text">{{ move.displayText }}</div>
+            </div>
+          </div>
+          <!-- NOTE: 棋譜リストの列とは別のスクロール領域にすることで、横スクロール時にツリーが列の下に -->
+          <!-- 潜り込むことがなくなり、半透明表示時の透けや二重の不透明度合成を避けられる。 -->
+          <div ref="treeScroll" class="tree-scroll">
+            <RecordBranchTree :record="record" @click-node="clickNode" />
+          </div>
+        </div>
+      </div>
+    </div>
+    <div v-if="showSubArea" class="row sub-area">
+      <slot name="sub-area"></slot>
+    </div>
+    <div v-else-if="showBranches" ref="branchListArea" class="row branch-list-area">
+      <!-- NOTE: 背景だけを透過させるために背景専用の要素を作る。 -->
+      <div class="move-list-background" :style="{ opacity }"></div>
+      <div class="auto column branch-list-main">
+        <div ref="branchList" class="auto full branch-list">
+          <div
+            v-for="(branch, index) in branches"
+            :key="index"
+            class="row move-element"
+            :class="{
+              selected: branchListMode !== BranchListMode.NEXT_MOVE && branch.activeBranch,
+            }"
+            @click="changeBranch(index)"
+          >
+            <div class="move-text">{{ branch.displayText }}</div>
+            <div v-if="showComment" class="move-comment">
+              <button
+                v-if="operational && (positionCounts.get(branch.sfen) || 0) >= 2"
+                class="duplicate"
+                @click.stop="showDuplicatePositions(branch.sfen)"
+              >
+                {{ t.duplicatePos }}
+              </button>
+              <span v-if="branch.bookmark" class="bookmark">{{ branch.bookmark }}</span>
+              {{ branch.comment }}
+            </div>
+          </div>
+        </div>
+        <div v-if="showBackToMainBranch">
+          <button
+            class="branch-bottom-control"
+            :disabled="!operational"
+            @click="emit('backToMainBranch')"
+          >
+            {{ t.backToMainBranch }}
+          </button>
+        </div>
+      </div>
+      <div v-if="branchListMode !== BranchListMode.NEXT_MOVE" class="column branch-side-control">
+        <button :disabled="!operational" @click="swapWithPreviousBranch()">
+          <Icon :icon="IconType.ARROW_UP" />
+        </button>
+        <button :disabled="!operational" @click="swapWithNextBranch()">
+          <Icon :icon="IconType.ARROW_DROP" />
+        </button>
+      </div>
+    </div>
+    <div v-if="showBottomControl" class="row wrap options">
+      <div v-if="subAreaToggleLabel" class="option">
+        <ToggleButton v-model:value="showSubArea" :label="subAreaToggleLabel" />
+      </div>
+      <div class="option">
+        <ToggleButton
+          :label="t.tree"
+          :value="showBranchTree"
+          @update:value="(enabled: boolean) => emit('toggleShowBranchTree', enabled)"
+        />
+      </div>
+      <div v-if="!showBranchTree" class="option">
+        <ToggleButton
+          :label="t.elapsedTime"
+          :value="showElapsedTime"
+          @update:value="(enabled: boolean) => emit('toggleShowElapsedTime', enabled)"
+        />
+      </div>
+      <div v-if="!showBranchTree" class="option">
+        <ToggleButton
+          :label="t.commentsAndBookmarks"
+          :value="showComment"
+          @update:value="(enabled: boolean) => emit('toggleShowComment', enabled)"
+        />
+      </div>
+    </div>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { ImmutableRecord, ImmutableNode } from "tsshogi";
+import { computed, ref, PropType, onUpdated, onMounted, onBeforeUnmount, watch } from "vue";
+import Icon from "@/renderer/view/primitive/Icon.vue";
+import { IconType } from "@/renderer/assets/icons";
+import RecordBranchTree from "@/renderer/view/primitive/RecordBranchTree.vue";
+import ToggleButton from "./ToggleButton.vue";
+import { RecordShortcutKeys } from "./board/shortcut";
+import { t } from "@/common/i18n";
+import { BranchListMode } from "@/common/settings/app";
+
+const props = defineProps({
+  record: {
+    type: Object as PropType<ImmutableRecord>,
+    required: true,
+  },
+  positionCounts: {
+    type: Object as PropType<ReadonlyMap<string, number>>,
+    default: () => new Map<string, number>(),
+  },
+  operational: {
+    type: Boolean,
+    required: false,
+  },
+  showElapsedTime: {
+    type: Boolean,
+    required: false,
+  },
+  showComment: {
+    type: Boolean,
+    required: false,
+  },
+  showBranchTree: {
+    type: Boolean,
+    required: false,
+  },
+  subAreaToggleLabel: {
+    type: String,
+    required: false,
+    default: undefined,
+  },
+  opacity: {
+    type: Number,
+    required: false,
+    default: 1.0,
+  },
+  showTopControl: {
+    type: Boolean,
+    required: false,
+    default: true,
+  },
+  showBottomControl: {
+    type: Boolean,
+    required: false,
+    default: true,
+  },
+  showBranches: {
+    type: Boolean,
+    required: false,
+    default: true,
+  },
+  shortcutKeys: {
+    type: Object as PropType<RecordShortcutKeys>,
+    required: true,
+  },
+  branchListMode: {
+    type: String as PropType<BranchListMode>,
+    required: false,
+    default: BranchListMode.SIBLING,
+  },
+});
+
+const emit = defineEmits<{
+  goBegin: [];
+  goBack: [];
+  goForward: [];
+  goEnd: [];
+  selectMove: [ply: number];
+  selectNode: [node: ImmutableNode];
+  selectBranch: [index: number];
+  selectNextBranch: [index: number];
+  backToMainBranch: [];
+  swapWithPreviousBranch: [];
+  swapWithNextBranch: [];
+  showDuplicatePositions: [sfen: string];
+  toggleShowElapsedTime: [enabled: boolean];
+  toggleShowComment: [enabled: boolean];
+  toggleShowBranchTree: [enabled: boolean];
+}>();
+
+const moveList = ref(null as HTMLDivElement | null);
+const treeScroll = ref(null as HTMLDivElement | null);
+const branchList = ref(null as HTMLDivElement | null);
+const branchListArea = ref(null as HTMLDivElement | null);
+const branchListAreaHeight = ref(0);
+const showSubArea = ref(false);
+
+let branchListAreaResizeObserver: ResizeObserver | null = null;
+onMounted(() => {
+  branchListAreaResizeObserver = new ResizeObserver((entries) => {
+    branchListAreaHeight.value = entries[0].contentRect.height;
+  });
+  if (branchListArea.value) {
+    branchListAreaResizeObserver.observe(branchListArea.value);
+  }
+});
+watch(branchListArea, (element, previous) => {
+  if (previous) {
+    branchListAreaResizeObserver?.unobserve(previous);
+  }
+  if (element) {
+    branchListAreaResizeObserver?.observe(element);
+    branchListAreaHeight.value = element.getBoundingClientRect().height;
+  } else {
+    branchListAreaHeight.value = 0;
+  }
+});
+onBeforeUnmount(() => {
+  branchListAreaResizeObserver?.disconnect();
+  branchListAreaResizeObserver = null;
+});
+
+const goBegin = () => {
+  if (props.operational) {
+    emit("goBegin");
+  }
+};
+
+const goBack = () => {
+  if (props.operational) {
+    emit("goBack");
+  }
+};
+
+const goForward = () => {
+  if (props.operational) {
+    emit("goForward");
+  }
+};
+
+const goEnd = () => {
+  if (props.operational) {
+    emit("goEnd");
+  }
+};
+
+const changePly = (number: number) => {
+  if (props.operational) {
+    emit("selectMove", Number(number));
+  }
+};
+
+const clickNode = (node: ImmutableNode) => {
+  if (props.operational) {
+    emit("selectNode", node);
+  }
+};
+
+const changeBranch = (index: number) => {
+  if (props.operational) {
+    if (props.branchListMode === BranchListMode.NEXT_MOVE) {
+      emit("selectNextBranch", Number(index));
+    } else {
+      emit("selectBranch", Number(index));
+    }
+  }
+};
+
+const swapWithPreviousBranch = () => {
+  if (props.operational) {
+    emit("swapWithPreviousBranch");
+  }
+};
+
+const swapWithNextBranch = () => {
+  if (props.operational) {
+    emit("swapWithNextBranch");
+  }
+};
+
+const showDuplicatePositions = (sfen: string) => {
+  if (props.operational) {
+    emit("showDuplicatePositions", sfen);
+  }
+};
+
+const showBackToMainBranch = computed(() => {
+  // 分岐エリアの高さが十分ではない場合に「本譜へ戻る」ボタンの表示を抑制
+  if (branchListAreaHeight.value < 70) {
+    return false;
+  }
+  // メインの分岐以外に居る場合に「本譜へ戻る」ボタンを表示
+  for (
+    let node: ImmutableNode | null = props.record.first;
+    node && node.activeBranch;
+    node = node.next
+  ) {
+    if (node === props.record.current) {
+      return false;
+    }
+  }
+  return true;
+});
+
+const branches = computed(() => {
+  if (props.branchListMode === BranchListMode.NEXT_MOVE) {
+    // Show next move branches (children of current position)
+    const next = props.record.current.next;
+    if (!next || !next.branch) {
+      // No branches or only one next move - don't show
+      return null;
+    }
+    const ret: ImmutableNode[] = [];
+    for (let p: ImmutableNode | null = next; p; p = p.branch) {
+      ret.push(p);
+    }
+    return ret;
+  } else {
+    // Current behavior - show sibling branches
+    if (!props.record.branchBegin.branch) {
+      return null;
+    }
+    const ret: ImmutableNode[] = [];
+    for (let p: ImmutableNode | null = props.record.branchBegin; p; p = p.branch) {
+      ret.push(p);
+    }
+    return ret;
+  }
+});
+
+onUpdated(() => {
+  const moveListElement = moveList.value;
+  moveListElement
+    ?.querySelector(".move-element.selected")
+    ?.scrollIntoView({ behavior: "auto", block: "nearest" });
+  // ツリー表示では現在のノードが見えるように、ツリー専用のスクロール領域を横方向にも追従させる。
+  const treeScrollElement = treeScroll.value;
+  if (props.showBranchTree && treeScrollElement) {
+    const currentNode = treeScrollElement.querySelector(".node.current");
+    if (currentNode) {
+      const containerRect = treeScrollElement.getBoundingClientRect();
+      const nodeRect = currentNode.getBoundingClientRect();
+      const margin = 10;
+      if (nodeRect.left < containerRect.left + margin) {
+        treeScrollElement.scrollLeft -= containerRect.left + margin - nodeRect.left;
+      } else if (nodeRect.right > containerRect.right - margin) {
+        treeScrollElement.scrollLeft += nodeRect.right - (containerRect.right - margin);
+      }
+    }
+  }
+  const branchListElement = branchList.value as HTMLElement;
+  branchListElement?.childNodes.forEach((elem) => {
+    if (elem instanceof HTMLElement && elem.classList.contains("selected")) {
+      elem.scrollIntoView({ behavior: "auto", block: "nearest" });
+    }
+  });
+});
+</script>
+
+<style scoped>
+.record-view {
+  user-select: none;
+}
+.record-view.limited {
+  max-width: calc(max(100vh, 600px));
+}
+.control {
+  width: 100%;
+  height: 8.6%;
+  min-height: 23px;
+}
+.control button {
+  height: 100%;
+  width: 25%;
+  padding: 0px;
+}
+.move-list-background {
+  position: absolute;
+  z-index: -1;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background-color: var(--text-bg-color);
+}
+.move-list-area {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  height: 0%;
+  flex: auto;
+}
+.move-list {
+  margin-top: 1px;
+  width: 100%;
+  height: 100%;
+  overflow-x: hidden;
+  overflow-y: auto;
+  color: var(--text-color);
+}
+.move-list-content {
+  width: 100%;
+}
+.move-list-column {
+  flex: none;
+}
+.tree-scroll {
+  /* ツリー部分のみ横スクロールできるようにする。棋譜リストの列は別要素なので巻き込まれない。 */
+  /* display: flex にしないと、スクロールコンテナの右側の padding がスクロール可能領域に */
+  /* 含まれず、右マージンが消えてしまう(ブロック要素の overflow ではトレイリング側の */
+  /* padding が仕様上考慮されないブラウザの挙動による)。 */
+  display: flex;
+  flex: auto;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0 20px;
+}
+.sub-area {
+  position: relative;
+  z-index: 1;
+  margin-top: 2px;
+  width: 100%;
+  height: calc(40% - 15px);
+  min-height: 40px;
+}
+.branch-list-area {
+  position: relative;
+  z-index: 1;
+  margin-top: 2px;
+  width: 100%;
+  height: calc(26.2% - 15px);
+  min-height: 40px;
+}
+.branch-list-main {
+  width: auto;
+  height: 100%;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+.branch-list {
+  min-height: 0;
+  color: var(--text-color);
+}
+.branch-bottom-control {
+  width: 100%;
+  padding: 2px;
+}
+.branch-side-control {
+  width: 40px;
+  height: 100%;
+}
+.branch-side-control button {
+  height: 50%;
+  width: 100%;
+  padding: 0;
+}
+.branch-side-control button .icon {
+  height: 40px;
+  max-height: 100%;
+}
+.move-element {
+  height: 1.4em;
+  width: 100%;
+  line-height: 1.4em;
+  font-size: 0.85em;
+  scroll-margin: 1em;
+}
+.move-element.has-branch:not(.selected) {
+  background-color: var(--text-bg-color-warning);
+}
+.move-list.with-tree .move-element.has-branch:not(.selected) {
+  background-color: transparent;
+}
+.move-element.selected {
+  background-color: var(--text-bg-color-selected);
+}
+.move-element:last-child {
+  margin-bottom: 1em;
+}
+.move-number {
+  min-width: 38px;
+  height: 100%;
+  padding-right: 5px;
+  text-align: right;
+  vertical-align: baseline;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: clip;
+}
+.move-text {
+  min-width: 100px;
+  height: 100%;
+  padding-right: 5px;
+  text-align: left;
+  vertical-align: baseline;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: clip;
+}
+.move-time {
+  min-width: fit-content;
+  height: 100%;
+  padding-right: 5px;
+  text-align: left;
+  vertical-align: baseline;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: clip;
+}
+.move-comment {
+  height: 100%;
+  text-align: left;
+  vertical-align: baseline;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+button.duplicate {
+  display: inline-block;
+  height: 100%;
+  font-size: 0.85em;
+  padding-left: 5px;
+  padding-right: 5px;
+  box-sizing: border-box;
+  margin: 0px 3px 0px 0px;
+  vertical-align: top;
+}
+.bookmark {
+  display: inline-block;
+  height: 100%;
+  color: var(--main-color);
+  background-color: var(--main-bg-color);
+  padding-left: 5px;
+  padding-right: 5px;
+  box-sizing: border-box;
+  border: 1px solid var(--text-separator-color);
+  border-radius: 5px;
+  vertical-align: top;
+}
+.options {
+  width: 100%;
+  margin: 0;
+  padding: 2px 0 0 0;
+  color: var(--main-color);
+  background-color: var(--main-bg-color);
+}
+.option {
+  padding: 0 6px 0 6px;
+  margin-right: 4px;
+}
+</style>

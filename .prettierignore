@@ -1,0 +1,14 @@
+docs/webapp*
+docs/third-party-licenses*
+docs/release.json
+docs/release-*.json
+dist
+dev-dist
+dist_electron
+coverage
+public/engines
+engines/build*
+.github/*TEMPLATE*
+.gitignore
+LICENSE.md
+src/tests/testdata
