@@ -104,13 +104,13 @@
 
 ### 4.4 特殊情况处理
 
-| 情况 | 处理 |
-| ---- | ---- |
-| 棋谱含分支（变化手顺） | 背诵**主页面当前选中的活动路径**（本谱或变化手顺）。不重置分支选择，退出时恢复进入前的节点与分支选择。 |
-| 初始局面非平手（駒落ち、编辑局面、SFEN 开局） | `goto(0)` 即恢复棋谱的初始局面（`initialPosition`），正常背诵。 |
-| 末尾为投了等特殊手 | 到达该节点前视为"全部背完"（见 3.3），不要求用户"走出"特殊手。 |
-| 千日手 / 反覆局面 | 与普通手无异；若棋谱因千日手结束，正常推进至最后一手。 |
-| 用户在背谱中操作棋谱面板 / 菜单 | 背谱模式处于新 `AppState.RECITATION`，既有逻辑（`appState !== AppState.NORMAL` 即禁用编辑/导航/菜单操作）自动生效；棋谱面板不可操作。 |
+| 情况                                          | 处理                                                                                                                                  |
+| --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| 棋谱含分支（变化手顺）                        | 背诵**主页面当前选中的活动路径**（本谱或变化手顺）。不重置分支选择，退出时恢复进入前的节点与分支选择。                                |
+| 初始局面非平手（駒落ち、编辑局面、SFEN 开局） | `goto(0)` 即恢复棋谱的初始局面（`initialPosition`），正常背诵。                                                                       |
+| 末尾为投了等特殊手                            | 到达该节点前视为"全部背完"（见 3.3），不要求用户"走出"特殊手。                                                                        |
+| 千日手 / 反覆局面                             | 与普通手无异；若棋谱因千日手结束，正常推进至最后一手。                                                                                |
+| 用户在背谱中操作棋谱面板 / 菜单               | 背谱模式处于新 `AppState.RECITATION`，既有逻辑（`appState !== AppState.NORMAL` 即禁用编辑/导航/菜单操作）自动生效；棋谱面板不可操作。 |
 
 ### 4.5 退出恢复
 
@@ -140,9 +140,9 @@ RECITATION = "recitation",
 export type RecitationJudgement = "correct" | "wrong";
 
 export type RecitationResult = {
-  totalPly: number;      // 完成手数
-  mistakeCount: number;  // 错误次数（含提示）
-  elapsedMs: number;     // 用时
+  totalPly: number; // 完成手数
+  mistakeCount: number; // 错误次数（含提示）
+  elapsedMs: number; // 用时
 };
 
 export class RecitationState {
@@ -151,23 +151,23 @@ export class RecitationState {
 
   // getters
   get isActive(): boolean;
-  get currentPly(): number;       // 已正确背出的手数（record.current.ply）
-  get totalPly(): number;         // 背诵总手数（主线 Move 节点数）
+  get currentPly(): number; // 已正确背出的手数（record.current.ply）
+  get totalPly(): number; // 背诵总手数（主线 Move 节点数）
   get remainingPly(): number;
   get mistakeCount(): number;
   get elapsedMs(): number;
-  get isComplete(): boolean;      // current.next 为空或为特殊手
-  get expectedMove(): Move | undefined;  // 当前正解（供"提示"使用）
+  get isComplete(): boolean; // current.next 为空或为特殊手
+  get expectedMove(): Move | undefined; // 当前正解（供"提示"使用）
 
   // 方法
   answer(move: Move): RecitationJudgement | undefined;
   //   - 已完成/非法手 → undefined（不处理）
   //   - 正确 → 内部 record.append(move)，返回 "correct"
   //   - 错误 → 不修改 record，mistakeCount++，返回 "wrong"
-  hint(): void;                   // 显示正解（mistakeCount++，局面不变）
-  restart(): void;                // record.goto(0)，清空计数/计时
-  finish(): RecitationResult;     // 返回成绩（供总结对话框）
-  dispose(): void;                // 恢复进入前节点（gotoNode(savedNode)）
+  hint(): void; // 显示正解（mistakeCount++，局面不变）
+  restart(): void; // record.goto(0)，清空计数/计时
+  finish(): RecitationResult; // 返回成绩（供总结对话框）
+  dispose(): void; // 恢复进入前节点（gotoNode(savedNode)）
 }
 ```
 
@@ -226,11 +226,11 @@ export class RecitationState {
 
 v1 **不新增持久化设置**，以下能力以对话框内按钮/固定行为提供：
 
-| 项目 | 行为 |
-| ---- | ---- |
-| 提示（显示正解） | 对话框按钮，每次计 1 次错误 |
-| 重新开始 | 对话框按钮，确认后从头开始 |
-| 自动翻转棋盘 | 固定开启（当前手番在下方），可手动切换 |
+| 项目             | 行为                                   |
+| ---------------- | -------------------------------------- |
+| 提示（显示正解） | 对话框按钮，每次计 1 次错误            |
+| 重新开始         | 对话框按钮，确认后从头开始             |
+| 自动翻转棋盘     | 固定开启（当前手番在下方），可手动切换 |
 
 将来如需设置化（见 §8），按 `common/settings/` 现有模式（default / normalize / validate）新增 `RecitationSettings`。
 
@@ -238,27 +238,27 @@ v1 **不新增持久化设置**，以下能力以对话框内按钮/固定行为
 
 ### 新增文件
 
-| 文件 | 内容 |
-| ---- | ---- |
-| `specs/recitation-mode.md` | 本文档 |
-| `src/common/recitation/recitation.ts` | `RecitationState` 核心类（纯逻辑） |
-| `src/renderer/store/recitation.ts` | Vue 响应式封装（`createRecitationStore` / `useRecitationStore`，参照 `nextmove.ts` 的 quiz store 部分） |
-| `src/renderer/view/dialog/RecitationDialog.vue` | 桌面版对话框 |
-| `src/renderer/view/dialog/MobileRecitationDialog.vue` | 移动版对话框 |
-| `src/renderer/view/dialog/recitation_controller.ts` | 桌面/移动共享控制器（参照 `next_move_quiz.ts`） |
-| `src/tests/common/recitation/recitation.test.ts` | 核心逻辑单元测试 |
+| 文件                                                  | 内容                                                                                                    |
+| ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `specs/recitation-mode.md`                            | 本文档                                                                                                  |
+| `src/common/recitation/recitation.ts`                 | `RecitationState` 核心类（纯逻辑）                                                                      |
+| `src/renderer/store/recitation.ts`                    | Vue 响应式封装（`createRecitationStore` / `useRecitationStore`，参照 `nextmove.ts` 的 quiz store 部分） |
+| `src/renderer/view/dialog/RecitationDialog.vue`       | 桌面版对话框                                                                                            |
+| `src/renderer/view/dialog/MobileRecitationDialog.vue` | 移动版对话框                                                                                            |
+| `src/renderer/view/dialog/recitation_controller.ts`   | 桌面/移动共享控制器（参照 `next_move_quiz.ts`）                                                         |
+| `src/tests/common/recitation/recitation.test.ts`      | 核心逻辑单元测试                                                                                        |
 
 ### 修改文件
 
-| 文件 | 修改内容 |
-| ---- | ---- |
-| `src/common/control/state.ts` | `AppState` 新增 `RECITATION` |
-| `src/renderer/store/index.ts` | `startRecitation` / `stopRecitation` / `isRecitationActive`；`isMovableByUser` 处理 `RECITATION` |
-| `src/renderer/view/App.vue` | 挂载 `RecitationDialog` / `MobileRecitationDialog` |
-| `src/renderer/view/menu/FileMenu.vue` | 新增菜单按钮与 `states.recitation` |
-| `src/renderer/assets/icons.ts`（及图标资源） | （可选）新增背谱图标 |
-| `src/common/i18n/locales/{ja,en,vi,zh_tw}.ts` | 新增文案键（见下） |
-| `docs-templates/` + `docs/how-to-use`（生成物） | 使用说明补充背谱模式 |
+| 文件                                            | 修改内容                                                                                         |
+| ----------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| `src/common/control/state.ts`                   | `AppState` 新增 `RECITATION`                                                                     |
+| `src/renderer/store/index.ts`                   | `startRecitation` / `stopRecitation` / `isRecitationActive`；`isMovableByUser` 处理 `RECITATION` |
+| `src/renderer/view/App.vue`                     | 挂载 `RecitationDialog` / `MobileRecitationDialog`                                               |
+| `src/renderer/view/menu/FileMenu.vue`           | 新增菜单按钮与 `states.recitation`                                                               |
+| `src/renderer/assets/icons.ts`（及图标资源）    | （可选）新增背谱图标                                                                             |
+| `src/common/i18n/locales/{ja,en,vi,zh_tw}.ts`   | 新增文案键（见下）                                                                               |
+| `docs-templates/` + `docs/how-to-use`（生成物） | 使用说明补充背谱模式                                                                             |
 
 ### i18n 新增键（示例，4 语言）
 
@@ -289,19 +289,19 @@ recitationResult     总手数 / 用时 / 错误次数
 
 单元测试（vitest，`src/tests/common/recitation/`）：
 
-| 用例 | 期望 |
-| ---- | ---- |
-| 从平手开局棋谱开始背谱，正确走子 | 返回 `correct`，`currentPly` 递增，棋谱不新增节点 |
-| 错误走子（合法但非正解） | 返回 `wrong`，`mistakeCount` +1，`currentPly` 不变，棋谱结构不变（无新分支） |
-| 连续错误后下出正解 | 错误多次后正确手仍能推进 |
-| 最后一手正确后 | `isComplete === true`，`finish()` 返回正确统计 |
-| 以投了结束的棋谱 | 所有 Move 走完后 `isComplete === true`，不要求走出特殊手 |
-| 含分支的棋谱 | 只按主线判定；错误手不创建分支 |
-| 非平手初始局面（SFEN 駒落ち） | 从棋谱初始局面开始 |
-| `hint()` | 计入错误次数，局面不变，后续走子仍按原逻辑判定 |
-| `restart()` | 回到 0 手，计数清零 |
-| `dispose()` | 恢复进入前的节点与分支选择 |
-| 空棋谱 / 无下一手 | `start` 阶段被拒绝（Store 层校验） |
+| 用例                             | 期望                                                                         |
+| -------------------------------- | ---------------------------------------------------------------------------- |
+| 从平手开局棋谱开始背谱，正确走子 | 返回 `correct`，`currentPly` 递增，棋谱不新增节点                            |
+| 错误走子（合法但非正解）         | 返回 `wrong`，`mistakeCount` +1，`currentPly` 不变，棋谱结构不变（无新分支） |
+| 连续错误后下出正解               | 错误多次后正确手仍能推进                                                     |
+| 最后一手正确后                   | `isComplete === true`，`finish()` 返回正确统计                               |
+| 以投了结束的棋谱                 | 所有 Move 走完后 `isComplete === true`，不要求走出特殊手                     |
+| 含分支的棋谱                     | 只按主线判定；错误手不创建分支                                               |
+| 非平手初始局面（SFEN 駒落ち）    | 从棋谱初始局面开始                                                           |
+| `hint()`                         | 计入错误次数，局面不变，后续走子仍按原逻辑判定                               |
+| `restart()`                      | 回到 0 手，计数清零                                                          |
+| `dispose()`                      | 恢复进入前的节点与分支选择                                                   |
+| 空棋谱 / 无下一手                | `start` 阶段被拒绝（Store 层校验）                                           |
 
 集成/手工验收：
 
