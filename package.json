@@ -63,7 +63,6 @@
   "module": "dist/src/background/index.js",
   "dependencies": {
     "@bufbuild/protobuf": "^2.13.0",
-    "@esbuild/win32-x64": "^0.28.2",
     "@github/hotkey": "^3.1.4",
     "async-lock": "^1.4.0",
     "chart.js": "^4.5.1",
@@ -122,6 +121,12 @@
     "vitest": "^4.1.9",
     "vue-tsc": "^3.3.8",
     "webpack": "^5.109.2",
-    "webpack-cli": "^7.2.2"
+    "webpack-cli": "^7.2.2",
+    "workbox-cacheable-response": "^7.4.1",
+    "workbox-expiration": "^7.4.1",
+    "workbox-precaching": "^7.4.1",
+    "workbox-range-requests": "^7.4.1",
+    "workbox-routing": "^7.4.1",
+    "workbox-strategies": "^7.4.1"
   }
 }
