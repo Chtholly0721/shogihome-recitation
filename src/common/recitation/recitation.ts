@@ -133,7 +133,7 @@ export class RecitationState {
    * 背譜する手番でない場合や完了後は undefined を返します。
    */
   answer(move: Move): RecitationJudgement | undefined {
-    if (this.isComplete || !this.isUserTurn) {
+    if (!this.isUserTurn) {
       return undefined;
     }
     const expectedNode = this.nextMoveNode();
@@ -144,9 +144,7 @@ export class RecitationState {
       this._mistakeCount++;
       return "wrong";
     }
-    this._history.push(this._record.current);
-    this._record.gotoNode(expectedNode);
-    this._progress++;
+    this.advanceUserMove(expectedNode);
     return "correct";
   }
 
@@ -157,7 +155,7 @@ export class RecitationState {
    * 背譜する手番でない場合や完了後は何もしません。
    */
   hint(): void {
-    if (this.isComplete || !this.isUserTurn) {
+    if (!this.isUserTurn) {
       return;
     }
     const expectedNode = this.nextMoveNode();
@@ -165,9 +163,7 @@ export class RecitationState {
       return;
     }
     this._mistakeCount++;
-    this._history.push(this._record.current);
-    this._record.gotoNode(expectedNode);
-    this._progress++;
+    this.advanceUserMove(expectedNode);
   }
 
   /**
@@ -229,6 +225,12 @@ export class RecitationState {
     this._record.gotoNode(this._savedNode);
   }
 
+  private advanceUserMove(node: ImmutableNode): void {
+    this._history.push(this._record.current);
+    this._record.gotoNode(node);
+    this._progress++;
+  }
+
   /** 現在のノードの次（アクティブ経路上）の指し手ノードを返します。 */
   private nextMoveNode(): ImmutableNode | null {
     return this.nextActiveMoveNodeFrom(this._record.current);
@@ -258,7 +260,7 @@ export class RecitationState {
    * 呼び出し側（UI 層）でタイマーを使って呼び出します。
    */
   advanceToUserTurn(): void {
-    while (!this.isComplete && !this.isUserTurn) {
+    while (!this.isUserTurn) {
       const node = this.nextMoveNode();
       if (!node) {
         break;

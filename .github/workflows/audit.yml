@@ -4,6 +4,9 @@ permissions:
   contents: read
 
 on:
+  push:
+    tags:
+      - "v*-recitation"
   schedule:
     - cron: "0 0 * * 2,6" # Every Tuesday and Saturday at 09:00 JST
   workflow_dispatch:
@@ -23,22 +26,19 @@ jobs:
           cache: "npm"
       - run: npm install -g npm@latest
       - run: npm version
-      - run: |
-          STABLE_TAG=$(cat docs/release.json | jq -r .stable.tag)
-          LATEST_TAG=$(cat docs/release.json | jq -r .latest.tag)
-          echo "STABLE_TAG=$STABLE_TAG" >> $GITHUB_ENV
-          echo "LATEST_TAG=$LATEST_TAG" >> $GITHUB_ENV
-      - name: Latest Version
+      - name: Audit current revision
         run: |
-          set -euo pipefail
-          echo "Latest Version is $LATEST_TAG"
-          git checkout $LATEST_TAG
           npm ci --dry-run --prefer-online
           npm audit --audit-level critical
-      - name: Stable Version
+      - name: Audit latest recitation release
         run: |
           set -euo pipefail
-          echo "Stable Version is $STABLE_TAG"
-          git checkout $STABLE_TAG
+          release_tag=$(git tag --list 'v*-recitation' --sort=-version:refname | sed -n '1p')
+          if [[ -z "$release_tag" ]]; then
+            echo "::error::No recitation release tag found"
+            exit 1
+          fi
+          echo "Auditing $release_tag"
+          git checkout --detach "refs/tags/$release_tag"
           npm ci --dry-run --prefer-online
           npm audit --audit-level critical
